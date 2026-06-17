@@ -1,0 +1,43 @@
+{
+    "name": "serverpulse/laravel-agent",
+    "description": "ServerPulse monitoring and license agent for Laravel applications",
+    "type": "library",
+    "license": "proprietary",
+    "require": {
+        "php": "^8.1",
+        "illuminate/console": "^10.0|^11.0|^12.0|^13.0",
+        "illuminate/http": "^10.0|^11.0|^12.0|^13.0",
+        "illuminate/support": "^10.0|^11.0|^12.0|^13.0"
+    },
+    "require-dev": {
+        "mockery/mockery": "^1.6",
+        "orchestra/testbench": "^8.0|^9.0|^10.0",
+        "pestphp/pest": "^2.0|^3.0|^4.0",
+        "phpstan/phpstan": "^2.0",
+        "laravel/pint": "^1.29"
+    },
+    "autoload": {
+        "psr-4": {
+            "ServerPulse\\Agent\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "ServerPulse\\Agent\\Tests\\": "tests/"
+        }
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "ServerPulse\\Agent\\ServerPulseServiceProvider"
+            ]
+        }
+    },
+    "config": {
+        "allow-plugins": {
+            "pestphp/pest-plugin": true
+        }
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true
+}
