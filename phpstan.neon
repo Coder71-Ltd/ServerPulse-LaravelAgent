@@ -1,0 +1,8 @@
+parameters:
+    paths:
+        - src/
+
+    level: 7
+
+    scanDirectories:
+        - vendor/orchestra/testbench-core/laravel
