@@ -13,7 +13,7 @@ beforeEach(function () {
 
 it('sends payload and returns success on 202', function () {
     Http::fake([
-        'webhook.site/*' => Http::response(['status' => 'accepted'], 202),
+        'serverpulse.coder71.com/*' => Http::response(['status' => 'accepted'], 202),
     ]);
 
     $config = new ConfigService(tempCachePath());
@@ -24,9 +24,10 @@ it('sends payload and returns success on 202', function () {
     expect($result['status'])->toBe(202);
 
     Http::assertSent(function ($request) {
-        return $request->url() === 'https://webhook.site/29b56555-241e-4a78-a2e0-5eac404acadf/v1/agent/report'
+        return $request->url() === 'https://serverpulse.coder71.com/v1/agent/report'
             && $request->method() === 'POST'
             && $request->header('X-Agent-Version')[0] === '1.0'
+            && ($request->header('X-API-Key')[0] ?? '') === 'sp_dev_agent_key_001'
             && $request['test'] === 'data';
     });
 });
@@ -36,7 +37,7 @@ it('marks agent disabled on 410 response', function () {
     file_put_contents($cachePath, json_encode(['enabled' => true]));
 
     Http::fake([
-        'webhook.site/*' => Http::response(['error' => 'agent_disabled'], 410),
+        'serverpulse.coder71.com/*' => Http::response(['error' => 'agent_disabled'], 410),
     ]);
 
     $config = new ConfigService($cachePath);
@@ -54,7 +55,7 @@ it('marks agent disabled on 410 response', function () {
 
 it('returns failure on network error', function () {
     Http::fake([
-        'webhook.site/*' => function () {
+        'serverpulse.coder71.com/*' => function () {
             throw new Exception('Connection timed out');
         },
     ]);
