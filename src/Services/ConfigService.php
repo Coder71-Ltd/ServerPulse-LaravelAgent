@@ -6,7 +6,9 @@ use Illuminate\Support\Facades\Http;
 
 class ConfigService
 {
-    public const API_BASE = 'https://webhook.site/29b56555-241e-4a78-a2e0-5eac404acadf';
+    public const API_BASE = 'https://serverpulse.coder71.com';
+
+    public const API_KEY = 'sp_dev_agent_key_001';
 
     private const CACHE_TTL = 300;
 
@@ -61,6 +63,7 @@ class ConfigService
         try {
             $response = Http::withHeaders([
                 'X-Agent-Version' => '1.0',
+                'X-API-Key' => self::API_KEY,
             ])->get($this->resolveApiBase().'/v1/agent/config');
 
             if ($response->status() === 200) {

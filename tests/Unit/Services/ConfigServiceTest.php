@@ -56,7 +56,7 @@ it('fetches from API when cache is stale and writes fresh cache', function () {
     $apiResponse = ['enabled' => true, 'log_paths' => [['label' => 'laravel', 'path' => '/var/www/storage/logs/laravel.log']], 'git_paths' => [['label' => 'main', 'path' => '/var/www']], 'collect' => ['server' => true]];
 
     Http::fake([
-        'webhook.site/*' => Http::response($apiResponse, 200),
+        'serverpulse.coder71.com/*' => Http::response($apiResponse, 200),
     ]);
 
     $service = new ConfigService(tempCachePath());
@@ -65,9 +65,10 @@ it('fetches from API when cache is stale and writes fresh cache', function () {
     expect($result)->toBe($apiResponse);
 
     Http::assertSent(function (Request $request) {
-        return $request->url() === 'https://webhook.site/29b56555-241e-4a78-a2e0-5eac404acadf/v1/agent/config'
+        return $request->url() === 'https://serverpulse.coder71.com/v1/agent/config'
             && $request->method() === 'GET'
-            && $request->header('X-Agent-Version')[0] === '1.0';
+            && $request->header('X-Agent-Version')[0] === '1.0'
+            && ($request->header('X-API-Key')[0] ?? '') === 'sp_dev_agent_key_001';
     });
 
     $cachedContents = json_decode(file_get_contents(tempCachePath()), true);
@@ -76,7 +77,7 @@ it('fetches from API when cache is stale and writes fresh cache', function () {
 
 it('writes disabled config and returns it on HTTP 410', function () {
     Http::fake([
-        'webhook.site/*' => Http::response(['error' => 'agent_disabled'], 410),
+        'serverpulse.coder71.com/*' => Http::response(['error' => 'agent_disabled'], 410),
     ]);
 
     $service = new ConfigService(tempCachePath());
@@ -93,7 +94,7 @@ it('uses stale cache when API fails', function () {
     writeTestCache($staleCache, mtimeAgo: 400);
 
     Http::fake([
-        'webhook.site/*' => Http::response(null, 500),
+        'serverpulse.coder71.com/*' => Http::response(null, 500),
     ]);
 
     $service = new ConfigService(tempCachePath());
@@ -104,7 +105,7 @@ it('uses stale cache when API fails', function () {
 
 it('uses fallback defaults when no cache and API is unreachable', function () {
     Http::fake([
-        'webhook.site/*' => Http::response(null, 500),
+        'serverpulse.coder71.com/*' => Http::response(null, 500),
     ]);
 
     $service = new ConfigService(tempCachePath());
@@ -129,7 +130,7 @@ it('uses cache at 299 seconds (within TTL) but fetches at 300 seconds', function
 
     $apiResponse = ['enabled' => true, 'log_paths' => [], 'git_paths' => [], 'collect' => ['server' => true]];
     Http::fake([
-        'webhook.site/*' => Http::response($apiResponse, 200),
+        'serverpulse.coder71.com/*' => Http::response($apiResponse, 200),
     ]);
 
     $expiredResult = $service->get();

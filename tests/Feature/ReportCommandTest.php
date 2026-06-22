@@ -25,7 +25,7 @@ it('runs report command and sends payload to API', function () {
     $this->app->instance(ConfigService::class, new ConfigService($cachePath));
 
     Http::fake([
-        'webhook.site/*' => Http::response(['status' => 'accepted'], 202),
+        'serverpulse.coder71.com/*' => Http::response(['status' => 'accepted'], 202),
     ]);
 
     $this->artisan('serverpulse:report')->assertSuccessful();
@@ -69,7 +69,7 @@ it('prevents concurrent execution via pid lock', function () {
     $this->app->instance(ConfigService::class, new ConfigService($cachePath));
 
     Http::fake([
-        'webhook.site/*' => Http::response(['status' => 'accepted'], 202),
+        'serverpulse.coder71.com/*' => Http::response(['status' => 'accepted'], 202),
     ]);
 
     $lockFile = sys_get_temp_dir().DIRECTORY_SEPARATOR.'serverpulse.lock';

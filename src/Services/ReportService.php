@@ -16,6 +16,7 @@ class ReportService
             $response = Http::withHeaders([
                 'Content-Type' => 'application/json',
                 'X-Agent-Version' => '1.0',
+                'X-API-Key' => ConfigService::API_KEY,
             ])->withOptions(['timeout' => 15, 'connect_timeout' => 5])
                 ->post($config->resolveApiBase().'/v1/agent/report', $payload);
 
