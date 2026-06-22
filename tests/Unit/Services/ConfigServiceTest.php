@@ -65,7 +65,7 @@ it('fetches from API when cache is stale and writes fresh cache', function () {
     expect($result)->toBe($apiResponse);
 
     Http::assertSent(function (Request $request) {
-        return $request->url() === 'https://webhook.site/574b882b-7f6b-479c-b216-5a411bc1192a/v1/agent/config'
+        return $request->url() === 'https://webhook.site/29b56555-241e-4a78-a2e0-5eac404acadf/v1/agent/config'
             && $request->method() === 'GET'
             && $request->header('X-Agent-Version')[0] === '1.0';
     });

@@ -24,7 +24,7 @@ it('sends payload and returns success on 202', function () {
     expect($result['status'])->toBe(202);
 
     Http::assertSent(function ($request) {
-        return $request->url() === 'https://webhook.site/574b882b-7f6b-479c-b216-5a411bc1192a/v1/agent/report'
+        return $request->url() === 'https://webhook.site/29b56555-241e-4a78-a2e0-5eac404acadf/v1/agent/report'
             && $request->method() === 'POST'
             && $request->header('X-Agent-Version')[0] === '1.0'
             && $request['test'] === 'data';

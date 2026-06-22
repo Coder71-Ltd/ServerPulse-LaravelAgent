@@ -6,7 +6,7 @@ use Illuminate\Support\Facades\Http;
 
 class ConfigService
 {
-    public const API_BASE = 'https://webhook.site/574b882b-7f6b-479c-b216-5a411bc1192a';
+    public const API_BASE = 'https://webhook.site/29b56555-241e-4a78-a2e0-5eac404acadf';
 
     private const CACHE_TTL = 300;
 
