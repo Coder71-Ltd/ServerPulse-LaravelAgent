@@ -1,7 +1,6 @@
 <?php
 
 use Orchestra\Testbench\TestCase;
-use ServerPulse\Agent\Collectors\BaseCollector;
 use ServerPulse\Agent\Collectors\ServerCollector;
 
 uses(TestCase::class);
@@ -485,7 +484,7 @@ it('returns all null when all data sources return null', function () {
     assertServerKeys($result);
 
     foreach ($result as $key => $value) {
-        expect($value)->toBeNull("Expected key '$key' to be null, got " . json_encode($value));
+        expect($value)->toBeNull("Expected key '$key' to be null, got ".json_encode($value));
     }
 });
 
@@ -576,7 +575,7 @@ it('handles base collector exception wrapping', function () {
     {
         protected function doCollect(array $config): array
         {
-            throw new \RuntimeException('Simulated failure');
+            throw new RuntimeException('Simulated failure');
         }
     };
 
