@@ -44,6 +44,10 @@ class ReportCommand extends Command
 
             $this->info('Payload keys: '.implode(', ', array_keys($payload)));
 
+            if ($this->output->isVerbose()) {
+                $this->line(json_encode($payload, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+            }
+
             $result = $this->report->send($payload, $this->config);
 
             if ($result['success']) {
