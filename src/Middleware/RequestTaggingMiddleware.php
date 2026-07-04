@@ -5,7 +5,6 @@ namespace ServerPulse\Agent\Middleware;
 use Closure;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Http;
-use ServerPulse\Agent\Collectors\DomainCollector;
 use ServerPulse\Agent\Services\ConfigService;
 
 class RequestTaggingMiddleware
@@ -53,26 +52,20 @@ class RequestTaggingMiddleware
 
         $queued = true;
 
-        $domainCollector = new DomainCollector;
-        $domain = $domainCollector->collect([]);
-
         try {
-            $config = app(ConfigService::class);
-            $apiBase = $config->resolveApiBase();
+            $configService = app(ConfigService::class);
+            $apiBase = $configService->resolveApiBase();
         } catch (\Throwable $e) {
-            $config = new ConfigService;
-            $apiBase = $config->resolveApiBase();
+            $configService = new ConfigService;
+            $apiBase = $configService->resolveApiBase();
         }
 
-        register_shutdown_function(function () use ($heartbeatFile, $domain, $apiBase) {
-            $this->sendHeartbeat($heartbeatFile, $domain, $apiBase);
+        register_shutdown_function(function () use ($heartbeatFile, $configService, $apiBase) {
+            $this->sendHeartbeat($heartbeatFile, $configService, $apiBase);
         });
     }
 
-    /**
-     * @param  array<string, mixed>  $domain
-     */
-    private function sendHeartbeat(string $heartbeatFile, array $domain, string $apiBase): void
+    private function sendHeartbeat(string $heartbeatFile, ConfigService $configService, string $apiBase): void
     {
         $lockFile = $heartbeatFile.'.lock';
 
@@ -100,8 +93,25 @@ class RequestTaggingMiddleware
                 'timestamp' => date('Y-m-d\TH:i:s\Z'),
                 'agent_ver' => '1.0',
                 'heartbeat' => true,
-                'domain' => $domain,
             ];
+
+            $config = $configService->get();
+
+            $collectors = app()->tagged('serverpulse.collectors');
+
+            foreach ($collectors as $collector) {
+                $key = $collector->key();
+
+                if (isset($config['collect'][$key]) && $config['collect'][$key] === false) {
+                    continue;
+                }
+
+                try {
+                    $payload[$key] = $collector->collect($config);
+                } catch (\Throwable $e) {
+                    $payload[$key] = [];
+                }
+            }
 
             Http::withHeaders([
                 'Content-Type' => 'application/json',
