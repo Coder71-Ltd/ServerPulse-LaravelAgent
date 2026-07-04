@@ -43,6 +43,7 @@ class ReportCommand extends Command
             $payload = $this->buildPayload($config);
 
             $this->info('Payload keys: '.implode(', ', array_keys($payload)));
+            $this->info('API URL: '.$this->config->resolveApiBase().'/v1/agent/report');
 
             if ($this->output->isVerbose()) {
                 $this->line(json_encode($payload, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
