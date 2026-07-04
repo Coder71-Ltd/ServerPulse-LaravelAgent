@@ -42,6 +42,8 @@ class ReportCommand extends Command
 
             $payload = $this->buildPayload($config);
 
+            $this->info('Payload keys: '.implode(', ', array_keys($payload)));
+
             $result = $this->report->send($payload, $this->config);
 
             if ($result['success']) {
