@@ -112,7 +112,7 @@ it('uses fallback defaults when no cache and API is unreachable', function () {
     $result = $service->get();
 
     expect($result['enabled'])->toBeTrue();
-    expect($result['log_paths'])->toBe([]);
+    expect($result['log_paths'])->toBe(['/var/log/laravel.log']);
     expect($result['git_paths'])->toBe([]);
     expect($result['collect'])->toHaveKeys(['server', 'web', 'php', 'database', 'git', 'logs', 'security', 'laravel', 'domain']);
 });
