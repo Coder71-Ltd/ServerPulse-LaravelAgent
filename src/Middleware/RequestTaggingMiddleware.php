@@ -151,13 +151,13 @@ class RequestTaggingMiddleware
     }
 
     /** @internal */
-    public function callGetRequestCount(): int
+    public static function callGetRequestCount(): int
     {
         return self::$requestCount;
     }
 
     /** @internal */
-    public function callGetAvgResponseTime(): float
+    public static function callGetAvgResponseTime(): float
     {
         if (self::$responseCount === 0) {
             return 0.0;
