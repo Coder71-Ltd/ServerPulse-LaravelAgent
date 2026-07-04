@@ -89,12 +89,14 @@ it('writes disabled config and returns it on HTTP 410', function () {
     expect($cached['enabled'])->toBeFalse();
 });
 
-it('uses stale cache when API fails', function () {
+it('uses stale cache when API throws network error', function () {
     $staleCache = ['enabled' => true, 'log_paths' => [['label' => 'old', 'path' => '/old/path']], 'git_paths' => [], 'collect' => []];
     writeTestCache($staleCache, mtimeAgo: 400);
 
     Http::fake([
-        'serverpulse.coder71.com/*' => Http::response(null, 500),
+        'serverpulse.coder71.com/*' => function () {
+            throw new Exception('Connection refused');
+        },
     ]);
 
     $service = new ConfigService(tempCachePath());

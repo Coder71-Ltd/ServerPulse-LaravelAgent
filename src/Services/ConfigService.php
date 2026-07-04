@@ -86,17 +86,19 @@ class ConfigService
 
                 return $config;
             }
+
+            // Non-200/410 response from API — use fallback defaults
+            return $this->fallbackDefaults;
         } catch (\Throwable $e) {
-            // fall through to fallback
+            // Network error or exception — use stale cache if available, else fallback
+            $stale = $this->readStaleCache();
+
+            if ($stale !== null) {
+                return $this->stripMetaKeys($stale);
+            }
+
+            return $this->fallbackDefaults;
         }
-
-        $stale = $this->readStaleCache();
-
-        if ($stale !== null) {
-            return $this->stripMetaKeys($stale);
-        }
-
-        return $this->fallbackDefaults;
     }
 
     public function resolveApiBase(): string
