@@ -18,7 +18,7 @@ class ConfigService
     private array $fallbackDefaults = [
         'enabled' => true,
         'blocked' => false,
-        'log_paths' => ['/var/log/laravel.log'],
+        'log_paths' => [],
         'git_paths' => [],
         'collect' => [
             'server' => true,

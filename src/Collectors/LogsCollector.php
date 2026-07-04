@@ -40,6 +40,14 @@ class LogsCollector extends BaseCollector
     {
         $logPaths = $this->normalizeLogPaths($config['log_paths'] ?? []);
 
+        if ($logPaths === []) {
+            $defaultPath = function_exists('storage_path')
+                ? storage_path('logs/laravel.log')
+                : sys_get_temp_dir().DIRECTORY_SEPARATOR.'laravel.log';
+
+            $logPaths = [$defaultPath];
+        }
+
         $results = [];
         foreach ($logPaths as $path) {
             if (! is_readable($path)) {
