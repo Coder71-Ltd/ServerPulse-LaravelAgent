@@ -32,7 +32,7 @@ class ReportService
                 return ['success' => false, 'status' => $status, 'error' => 'agent_disabled'];
             }
 
-            return ['success' => false, 'status' => $status, 'error' => 'unexpected_status'];
+            return ['success' => false, 'status' => $status, 'error' => "unexpected_status ({$status})"];
         } catch (\Throwable $e) {
             return ['success' => false, 'status' => null, 'error' => $e->getMessage()];
         }
