@@ -3,8 +3,12 @@
 namespace ServerPulse\Agent\Collectors;
 
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Queue;
+use Illuminate\Support\Facades\Redis;
 use Laravel\Horizon\Horizon;
 use Laravel\Octane\Octane;
+use ServerPulse\Agent\Middleware\RequestTaggingMiddleware;
+use ServerPulse\Agent\Monolog\ServerPulseHandler;
 
 class LaravelCollector extends BaseCollector
 {
@@ -19,6 +23,10 @@ class LaravelCollector extends BaseCollector
      */
     protected function doCollect(array $config): array
     {
+        $requestCount = $this->getMiddlewareRequestCount();
+        $avgResponseTime = $this->getMiddlewareAvgResponseTime();
+        RequestTaggingMiddleware::callReset();
+
         return [
             'app_env' => app()->environment(),
             'app_debug' => config('app.debug'),
@@ -32,36 +40,36 @@ class LaravelCollector extends BaseCollector
             'horizon_enabled' => class_exists(Horizon::class),
             'horizon_stats' => $this->getHorizonStats(),
             'octane_enabled' => class_exists(Octane::class),
-            'recent_exceptions' => 0,
-            'request_count_1m' => 0,
-            'response_time_avg_1m' => 0,
+            'octane_worker_count' => $this->getOctaneWorkerCount(),
+            'recent_exceptions' => $this->getRecentExceptions(),
+            'request_count_1m' => $requestCount,
+            'response_time_avg_1m' => $avgResponseTime,
         ];
     }
 
-    /**
-     * @return array<string, int>
-     */
-    private function getPendingJobs(): array
+    private function getPendingJobs(): int
     {
-        try {
-            $driver = config('queue.default');
-            $connection = config("queue.connections.{$driver}");
+        $driver = config('queue.default');
 
-            if (! is_array($connection)) {
-                return [];
-            }
-
-            if (($connection['driver'] ?? '') === 'database') {
-                $count = DB::table(config('queue.connections.database.table', 'jobs'))
-                    ->count();
-
-                return ['default' => $count];
-            }
-        } catch (\Throwable $e) {
-            // silently fail
+        if (in_array($driver, ['sync', 'null'], true)) {
+            return 0;
         }
 
-        return [];
+        try {
+            if ($driver === 'database') {
+                $table = config('queue.connections.database.table', 'jobs');
+                $queue = config('queue.connections.database.queue', 'default');
+
+                return DB::table($table)
+                    ->where('queue', '=', $queue)
+                    ->whereNull('reserved_at')
+                    ->count();
+            }
+
+            return Queue::size();
+        } catch (\Throwable $e) {
+            return 0;
+        }
     }
 
     private function getFailedJobs(): int
@@ -73,8 +81,29 @@ class LaravelCollector extends BaseCollector
         }
     }
 
+    private function getOctaneWorkerCount(): ?int
+    {
+        if (! class_exists(Octane::class)) {
+            return null;
+        }
+
+        try {
+            $stateFile = storage_path('logs/octane-server-state.json');
+
+            if (! file_exists($stateFile)) {
+                return null;
+            }
+
+            $state = json_decode(file_get_contents($stateFile), true);
+
+            return $state['state']['workers'] ?? null;
+        } catch (\Throwable $e) {
+            return null;
+        }
+    }
+
     /**
-     * @return array<string, mixed>|null
+     * @return array<string, int>|null
      */
     private function getHorizonStats(): ?array
     {
@@ -82,6 +111,68 @@ class LaravelCollector extends BaseCollector
             return null;
         }
 
-        return [];
+        try {
+            $redis = Redis::connection('horizon');
+            $prefix = config('horizon.prefix', 'horizon:');
+
+            $queueKeys = [];
+            $cursor = 0;
+
+            do {
+                $result = $redis->scan($cursor, [
+                    'MATCH' => $prefix.'queues:*',
+                    'COUNT' => 100,
+                ]);
+                $cursor = $result[0];
+
+                foreach ($result[1] as $key) {
+                    if (
+                        ! str_ends_with((string) $key, ':delayed')
+                        && ! str_ends_with((string) $key, ':reserved')
+                    ) {
+                        $queueKeys[] = $key;
+                    }
+                }
+            } while ($cursor != 0);
+
+            $totalPending = 0;
+
+            foreach ($queueKeys as $key) {
+                $totalPending += $redis->llen($key);
+            }
+
+            return $totalPending > 0 ? ['horizon_pending' => $totalPending] : null;
+        } catch (\Throwable $e) {
+            return null;
+        }
+    }
+
+    private function getMiddlewareRequestCount(): int
+    {
+        try {
+            return RequestTaggingMiddleware::callGetRequestCount();
+        } catch (\Throwable $e) {
+            return 0;
+        }
+    }
+
+    private function getMiddlewareAvgResponseTime(): float
+    {
+        try {
+            return RequestTaggingMiddleware::callGetAvgResponseTime();
+        } catch (\Throwable $e) {
+            return 0.0;
+        }
+    }
+
+    private function getRecentExceptions(): int
+    {
+        try {
+            $handler = app(ServerPulseHandler::class);
+
+            return $handler->getRecentExceptionCount();
+        } catch (\Throwable $e) {
+            return 0;
+        }
     }
 }
