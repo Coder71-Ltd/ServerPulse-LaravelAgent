@@ -32,7 +32,9 @@ class ReportService
                 return ['success' => false, 'status' => $status, 'error' => 'agent_disabled'];
             }
 
-            return ['success' => false, 'status' => $status, 'error' => "unexpected_status ({$status})"];
+            $body = mb_substr((string) $response->body(), 0, 1000);
+
+            return ['success' => false, 'status' => $status, 'error' => "unexpected_status ({$status}): {$body}"];
         } catch (\Throwable $e) {
             return ['success' => false, 'status' => null, 'error' => $e->getMessage()];
         }
