@@ -15,6 +15,7 @@ use ServerPulse\Agent\Collectors\SecurityCollector;
 use ServerPulse\Agent\Collectors\ServerCollector;
 use ServerPulse\Agent\Collectors\WebServerCollector;
 use ServerPulse\Agent\Console\Commands\ReportCommand;
+use ServerPulse\Agent\Middleware\BlockMiddleware;
 use ServerPulse\Agent\Middleware\RequestTaggingMiddleware;
 use ServerPulse\Agent\Services\ConfigService;
 use ServerPulse\Agent\Services\ReportService;
@@ -41,7 +42,12 @@ class ServerPulseServiceProvider extends ServiceProvider
     {
         $this->commands([ReportCommand::class]);
 
-        $this->callAfterResolving(Kernel::class, function ($kernel): void {
+        $this->callAfterResolving(Kernel::class, function (Kernel $kernel): void {
+            if (method_exists($kernel, 'prependMiddleware')) {
+                /** @var \Illuminate\Foundation\Http\Kernel $kernel */
+                $kernel->prependMiddleware(BlockMiddleware::class);
+            }
+
             if (method_exists($kernel, 'pushMiddleware')) {
                 /** @var \Illuminate\Foundation\Http\Kernel $kernel */
                 $kernel->pushMiddleware(RequestTaggingMiddleware::class);
