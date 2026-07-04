@@ -17,6 +17,7 @@ class ConfigService
      */
     private array $fallbackDefaults = [
         'enabled' => true,
+        'blocked' => false,
         'log_paths' => [],
         'git_paths' => [],
         'collect' => [
