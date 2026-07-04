@@ -4,6 +4,7 @@ namespace ServerPulse\Agent;
 
 use Illuminate\Console\Scheduling\Schedule;
 use Illuminate\Contracts\Http\Kernel;
+use Illuminate\Log\LogManager;
 use Illuminate\Support\ServiceProvider;
 use ServerPulse\Agent\Collectors\DatabaseCollector;
 use ServerPulse\Agent\Collectors\DomainCollector;
@@ -17,6 +18,7 @@ use ServerPulse\Agent\Collectors\WebServerCollector;
 use ServerPulse\Agent\Console\Commands\ReportCommand;
 use ServerPulse\Agent\Middleware\BlockMiddleware;
 use ServerPulse\Agent\Middleware\RequestTaggingMiddleware;
+use ServerPulse\Agent\Monolog\ServerPulseHandler;
 use ServerPulse\Agent\Services\ConfigService;
 use ServerPulse\Agent\Services\ReportService;
 
@@ -26,6 +28,7 @@ class ServerPulseServiceProvider extends ServiceProvider
     {
         $this->app->singleton(ConfigService::class);
         $this->app->singleton(ReportService::class);
+        $this->app->singleton(ServerPulseHandler::class);
 
         $this->app->tag(ServerCollector::class, 'serverpulse.collectors');
         $this->app->tag(WebServerCollector::class, 'serverpulse.collectors');
@@ -58,6 +61,11 @@ class ServerPulseServiceProvider extends ServiceProvider
             $schedule->command('serverpulse:report')
                 ->everyMinute()
                 ->withoutOverlapping(55);
+        });
+
+        $this->callAfterResolving('log', function (LogManager $log): void {
+            $handler = app(ServerPulseHandler::class);
+            $log->driver()->getLogger()->pushHandler($handler);
         });
     }
 }
