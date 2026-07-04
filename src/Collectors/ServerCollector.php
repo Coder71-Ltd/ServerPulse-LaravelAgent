@@ -24,43 +24,47 @@ class ServerCollector extends BaseCollector
      */
     protected function doCollect(array $config): array
     {
-        // D-10: Non-Linux early exit — no /proc filesystem available
-        if (PHP_OS_FAMILY !== 'Linux') {
+        try {
+            // D-10: Non-Linux early exit — no /proc filesystem available
+            if (PHP_OS_FAMILY !== 'Linux') {
+                return $this->nullResult();
+            }
+
+            // CPU metrics (SRV-01, SRV-02, SRV-03)
+            $load = $this->collectLoadAverages();
+            $cores = $this->collectCpuCores();
+
+            $cpuPercent = null;
+            if ($load['load_avg_1m'] !== null && $cores > 0) {
+                $cpuPercent = round(($load['load_avg_1m'] / $cores) * 100, 1);
+            }
+
+            // RAM metrics (SRV-04, SRV-05)
+            $ram = $this->collectRamMetrics();
+
+            // Disk metrics (SRV-06, SRV-07)
+            $disk = $this->collectDiskMetrics();
+
+            // Uptime metric (SRV-08)
+            $uptime = $this->collectUptime();
+
+            return [
+                'cpu_percent' => $cpuPercent,
+                'load_avg_1m' => $load['load_avg_1m'],
+                'load_avg_5m' => $load['load_avg_5m'],
+                'load_avg_15m' => $load['load_avg_15m'],
+                'cpu_cores' => $cores,
+                'ram_total_mb' => $ram['ram_total_mb'],
+                'ram_used_mb' => $ram['ram_used_mb'],
+                'ram_percent' => $ram['ram_percent'],
+                'disk_total_gb' => $disk['disk_total_gb'],
+                'disk_used_gb' => $disk['disk_used_gb'],
+                'disk_percent' => $disk['disk_percent'],
+                'uptime_seconds' => $uptime,
+            ];
+        } catch (\Throwable $e) {
             return $this->nullResult();
         }
-
-        // CPU metrics (SRV-01, SRV-02, SRV-03)
-        $load = $this->collectLoadAverages();
-        $cores = $this->collectCpuCores();
-
-        $cpuPercent = null;
-        if ($load['load_avg_1m'] !== null && $cores > 0) {
-            $cpuPercent = round(($load['load_avg_1m'] / $cores) * 100, 1);
-        }
-
-        // RAM metrics (SRV-04, SRV-05)
-        $ram = $this->collectRamMetrics();
-
-        // Disk metrics (SRV-06, SRV-07)
-        $disk = $this->collectDiskMetrics();
-
-        // Uptime metric (SRV-08)
-        $uptime = $this->collectUptime();
-
-        return [
-            'cpu_percent' => $cpuPercent,
-            'load_avg_1m' => $load['load_avg_1m'],
-            'load_avg_5m' => $load['load_avg_5m'],
-            'load_avg_15m' => $load['load_avg_15m'],
-            'cpu_cores' => $cores,
-            'ram_total_mb' => $ram['ram_total_mb'],
-            'ram_used_mb' => $ram['ram_used_mb'],
-            'ram_percent' => $ram['ram_percent'],
-            'disk_total_gb' => $disk['disk_total_gb'],
-            'disk_used_gb' => $disk['disk_used_gb'],
-            'disk_percent' => $disk['disk_percent'],
-            'uptime_seconds' => $uptime,
-        ];
     }
 
     /**
