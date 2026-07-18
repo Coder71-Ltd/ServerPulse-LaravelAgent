@@ -68,7 +68,7 @@ it('fetches from API when cache is stale and writes fresh cache', function () {
         return $request->url() === 'https://serverpulse.coder71.com/v1/agent/config'
             && $request->method() === 'GET'
             && $request->header('X-Agent-Version')[0] === '1.0'
-            && ($request->header('X-API-Key')[0] ?? '') === 'sp_dev_agent_key_001';
+            && ($request->header('X-API-Key')[0] ?? '') === 'sp_dev_agent_key_002';
     });
 
     $cachedContents = json_decode(file_get_contents(tempCachePath()), true);

@@ -27,7 +27,7 @@ it('sends payload and returns success on 202', function () {
         return $request->url() === 'https://serverpulse.coder71.com/v1/agent/report'
             && $request->method() === 'POST'
             && $request->header('X-Agent-Version')[0] === '1.0'
-            && ($request->header('X-API-Key')[0] ?? '') === 'sp_dev_agent_key_001'
+            && ($request->header('X-API-Key')[0] ?? '') === 'sp_dev_agent_key_002'
             && $request['test'] === 'data';
     });
 });

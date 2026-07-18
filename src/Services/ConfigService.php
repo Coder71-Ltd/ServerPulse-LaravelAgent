@@ -8,7 +8,7 @@ class ConfigService
 {
     public const API_BASE = 'https://serverpulse.coder71.com';
 
-    public const API_KEY = 'sp_dev_agent_key_001';
+    public const API_KEY = 'sp_dev_agent_key_002';
 
     private const CACHE_TTL = 300;
 
