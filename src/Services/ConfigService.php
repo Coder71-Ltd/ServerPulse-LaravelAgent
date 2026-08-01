@@ -109,7 +109,7 @@ class ConfigService
         return config('services.serverpulse.api_base', 'https://api.serverpulse.io');
     }
 
-    private function resolveAgentDomain(): string
+    public function resolveAgentDomain(): string
     {
         if (! empty($_SERVER['HTTP_HOST'])) {
             return $_SERVER['HTTP_HOST'];

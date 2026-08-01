@@ -13,6 +13,7 @@ beforeEach(function () {
         'services.serverpulse.api_base' => 'https://test.example.com',
         'services.serverpulse.api_key' => 'test_key_123',
     ]);
+    $_SERVER['HTTP_HOST'] = 'myapp.example.com';
 });
 
 it('sends payload and returns success on 202', function () {
@@ -31,6 +32,7 @@ it('sends payload and returns success on 202', function () {
         return $request->url() === 'https://test.example.com/v1/agent/report'
             && $request->method() === 'POST'
             && $request->header('X-Agent-Version')[0] === '1.0'
+            && ($request->header('X-Agent-Domain')[0] ?? '') === 'myapp.example.com'
             && ($request->header('X-API-Key')[0] ?? '') === 'test_key_123'
             && $request['test'] === 'data';
     });

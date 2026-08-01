@@ -116,6 +116,7 @@ class RequestTaggingMiddleware
             Http::withHeaders([
                 'Content-Type' => 'application/json',
                 'X-Agent-Version' => '1.0',
+                'X-Agent-Domain' => $this->resolveAgentDomain(),
                 'X-API-Key' => config('services.serverpulse.api_key'),
             ])->withOptions(['timeout' => 5, 'connect_timeout' => 3])
                 ->post($apiBase.'/v1/agent/report', $payload);
@@ -174,6 +175,21 @@ class RequestTaggingMiddleware
         }
 
         return self::$totalResponseTime / self::$responseCount;
+    }
+
+    private function resolveAgentDomain(): string
+    {
+        if (! empty($_SERVER['HTTP_HOST'])) {
+            return $_SERVER['HTTP_HOST'];
+        }
+
+        $hostname = gethostname();
+
+        if ($hostname !== false && $hostname !== '') {
+            return $hostname;
+        }
+
+        return 'unknown';
     }
 
     /** @internal */
