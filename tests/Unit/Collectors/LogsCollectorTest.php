@@ -351,3 +351,51 @@ it('normalizes object-format log paths', function () {
     expect($result[1]['path'])->toBe($tempFile2);
     expect($result[1]['count'])->toBe(1);
 });
+
+it('reads log files via PHP fallback when shell is unavailable', function () {
+    $content = "[2026-08-01 10:15:30] production.ERROR: Shell offline error\n";
+    $content .= "[2026-08-01 10:15:31] production.CRITICAL: PHP fallback test\n";
+
+    $tempFile = createTempLog($content);
+
+    $collector = new class extends LogsCollector
+    {
+        protected function safeExec(string $command): ?string
+        {
+            return null;
+        }
+    };
+
+    $result = $collector->collect([
+        'log_paths' => [$tempFile],
+    ]);
+
+    unlink($tempFile);
+
+    expect($result)->toHaveCount(1);
+    expect($result[0]['path'])->toBe($tempFile);
+    expect($result[0]['count'])->toBe(2);
+    expect($result[0]['entries'][0]['level'])->toBe('ERROR');
+    expect($result[0]['entries'][0]['message'])->toBe('Shell offline error');
+    expect($result[0]['entries'][1]['level'])->toBe('CRITICAL');
+    expect($result[0]['entries'][1]['message'])->toBe('PHP fallback test');
+});
+
+it('returns zero count when both shell and PHP read fail', function () {
+    $collector = new class extends LogsCollector
+    {
+        protected function safeExec(string $command): ?string
+        {
+            return null;
+        }
+    };
+
+    $result = $collector->collect([
+        'log_paths' => ['/var/log/truly_missing.log'],
+    ]);
+
+    expect($result)->toHaveCount(1);
+    expect($result[0]['path'])->toBe('/var/log/truly_missing.log');
+    expect($result[0]['count'])->toBe(0);
+    expect($result[0]['entries'])->toBe([]);
+});

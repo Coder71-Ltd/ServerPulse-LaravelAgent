@@ -30,115 +30,122 @@ afterEach(function () {
     }
 });
 
+if (! function_exists('uniqueCachePath')) {
+    function uniqueCachePath(string $prefix): string
+    {
+        return sys_get_temp_dir().DIRECTORY_SEPARATOR.$prefix.'_'.getmypid().'_'.uniqid();
+    }
+}
+
 it('fetches config from live API and handles response correctly', function () {
-    $cachePath = sys_get_temp_dir().DIRECTORY_SEPARATOR.'sp_real_test_cache';
-    if (file_exists($cachePath)) {
-        unlink($cachePath);
-    }
+    $cachePath = uniqueCachePath('sp_real');
 
-    $config = new ConfigService($cachePath);
-    $result = $config->get();
+    try {
+        $config = new ConfigService($cachePath);
+        $result = $config->get();
 
-    expect($result)->toBeArray();
-    expect($result)->toHaveKey('enabled');
+        expect($result)->toBeArray();
+        expect($result)->toHaveKey('enabled');
 
-    if ($result['enabled'] === true) {
-        expect($result)->toHaveKey('collect');
-        expect($result['collect'])->toHaveKeys([
-            'server', 'web', 'php', 'database',
-            'git', 'logs', 'security', 'laravel', 'domain',
-        ]);
-    }
+        if ($result['enabled'] === true) {
+            expect($result)->toHaveKey('collect');
+            expect($result['collect'])->toHaveKeys([
+                'server', 'web', 'php', 'database',
+                'git', 'logs', 'security', 'laravel', 'domain',
+            ]);
+        }
 
-    $cached = json_decode(file_get_contents($cachePath), true);
-    expect($cached['enabled'])->toBe($result['enabled']);
-
-    if (file_exists($cachePath)) {
-        unlink($cachePath);
+        if (file_exists($cachePath)) {
+            $cached = json_decode(file_get_contents($cachePath), true);
+            expect($cached['enabled'])->toBe($result['enabled']);
+        }
+    } finally {
+        if (file_exists($cachePath)) {
+            unlink($cachePath);
+        }
     }
 })->group('real');
 
 it('caches config and does not re-fetch within TTL', function () {
-    $cachePath = sys_get_temp_dir().DIRECTORY_SEPARATOR.'sp_real_test_cache';
-    if (file_exists($cachePath)) {
-        unlink($cachePath);
-    }
+    $cachePath = uniqueCachePath('sp_real');
 
-    $config = new ConfigService($cachePath);
-    $first = $config->get();
-    expect($first)->toBeArray();
-    expect($first)->toHaveKey('enabled');
+    try {
+        $config = new ConfigService($cachePath);
+        $first = $config->get();
+        expect($first)->toBeArray();
+        expect($first)->toHaveKey('enabled');
 
-    Http::preventStrayRequests();
+        Http::preventStrayRequests();
 
-    $second = $config->get();
-    expect($second)->toBeArray();
-    expect($second)->toEqual($first);
+        $second = $config->get();
+        expect($second)->toBeArray();
+        expect($second)->toEqual($first);
 
-    Http::assertNothingSent();
-
-    if (file_exists($cachePath)) {
-        unlink($cachePath);
+        Http::assertNothingSent();
+    } finally {
+        if (file_exists($cachePath)) {
+            unlink($cachePath);
+        }
     }
 })->group('real');
 
 it('runs report command and exits gracefully', function () {
-    $cachePath = sys_get_temp_dir().DIRECTORY_SEPARATOR.'sp_real_test_cache';
-    if (file_exists($cachePath)) {
-        unlink($cachePath);
-    }
+    $cachePath = uniqueCachePath('sp_real');
 
-    $this->app->instance(ConfigService::class, new ConfigService($cachePath));
+    try {
+        $this->app->instance(ConfigService::class, new ConfigService($cachePath));
 
-    $result = $this->artisan('serverpulse:report');
+        $result = $this->artisan('serverpulse:report');
 
-    $result->assertSuccessful();
+        $result->assertSuccessful();
 
-    if (file_exists($cachePath)) {
-        $cached = json_decode(file_get_contents($cachePath), true);
-        if (($cached['enabled'] ?? true) === false) {
-            dump('NOTE: Agent is DISABLED — report cycle exited without sending (expected)');
+        if (file_exists($cachePath)) {
+            $cached = json_decode(file_get_contents($cachePath), true);
+            if (($cached['enabled'] ?? true) === false) {
+                dump('NOTE: Agent is DISABLED — report cycle exited without sending (expected)');
+            }
         }
-        unlink($cachePath);
+    } finally {
+        if (file_exists($cachePath)) {
+            unlink($cachePath);
+        }
     }
 })->group('real');
 
 it('resolves correct API base URL from config', function () {
-    $cachePath = sys_get_temp_dir().DIRECTORY_SEPARATOR.'sp_real_test_cache';
-    if (file_exists($cachePath)) {
-        unlink($cachePath);
-    }
+    $cachePath = uniqueCachePath('sp_real');
 
-    $config = new ConfigService($cachePath);
+    try {
+        $config = new ConfigService($cachePath);
 
-    $apiBase = $config->resolveApiBase();
+        $apiBase = $config->resolveApiBase();
 
-    expect($apiBase)->toStartWith('http');
-
-    if (file_exists($cachePath)) {
-        unlink($cachePath);
+        expect($apiBase)->toStartWith('http');
+    } finally {
+        if (file_exists($cachePath)) {
+            unlink($cachePath);
+        }
     }
 })->group('real');
 
 it('handles 410 disabled state — config returns enabled=false', function () {
-    $cachePath = sys_get_temp_dir().DIRECTORY_SEPARATOR.'sp_410_test_cache';
-    if (file_exists($cachePath)) {
-        unlink($cachePath);
-    }
+    $cachePath = uniqueCachePath('sp_410');
 
-    $config = new ConfigService($cachePath);
-    $result = $config->get();
+    try {
+        $config = new ConfigService($cachePath);
+        $result = $config->get();
 
-    expect($result)->toBeArray();
+        expect($result)->toBeArray();
 
-    if (($result['enabled'] ?? true) === false) {
-        expect($result)->not->toHaveKey('collect');
+        if (($result['enabled'] ?? true) === false) {
+            expect($result)->not->toHaveKey('collect');
 
-        $this->app->instance(ConfigService::class, $config);
-        $this->artisan('serverpulse:report')->assertSuccessful();
-    }
-
-    if (file_exists($cachePath)) {
-        unlink($cachePath);
+            $this->app->instance(ConfigService::class, $config);
+            $this->artisan('serverpulse:report')->assertSuccessful();
+        }
+    } finally {
+        if (file_exists($cachePath)) {
+            unlink($cachePath);
+        }
     }
 })->group('real');

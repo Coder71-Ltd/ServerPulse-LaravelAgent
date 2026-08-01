@@ -17,6 +17,7 @@ function assertGitKeys(array $result): void
     expect($result)->toHaveKeys([
         'branch',
         'commit',
+        'message',
     ]);
 }
 
@@ -35,6 +36,10 @@ it('returns branch and commit when in a git repo', function () {
     {
         protected function safeExec(string $command): ?string
         {
+            if (str_contains($command, 'log -1 --format=%s')) {
+                return 'feat: add commit message to git collector';
+            }
+
             if (str_contains($command, 'rev-parse --abbrev-ref HEAD')) {
                 return 'main';
             }
@@ -46,7 +51,6 @@ it('returns branch and commit when in a git repo', function () {
             return null;
         }
 
-        // Bypass .git guard: same doCollect logic but without is_dir check
         protected function doCollect(array $config): array
         {
             $repoPath = $config['git_path']
@@ -56,14 +60,18 @@ it('returns branch and commit when in a git repo', function () {
             $escaped = escapeshellarg($repoPath);
 
             $branch = $this->safeExec(
-                'git -C '.$escaped.' rev-parse --abbrev-ref HEAD 2>/dev/null'
+                'git -C '.$escaped.' rev-parse --abbrev-ref HEAD'
             );
 
             $commit = $this->safeExec(
-                'git -C '.$escaped.' rev-parse --short HEAD 2>/dev/null'
+                'git -C '.$escaped.' rev-parse --short HEAD'
             );
 
-            return ['branch' => $branch, 'commit' => $commit];
+            $message = $this->safeExec(
+                'git -C '.$escaped.' log -1 --format=%s'
+            );
+
+            return ['branch' => $branch, 'commit' => $commit, 'message' => $message];
         }
     };
 
@@ -71,6 +79,7 @@ it('returns branch and commit when in a git repo', function () {
 
     expect($result['branch'])->toBe('main');
     expect($result['commit'])->toBe('abc1234');
+    expect($result['message'])->toBe('feat: add commit message to git collector');
 });
 
 it("returns 'HEAD' branch in detached state", function () {
@@ -78,6 +87,10 @@ it("returns 'HEAD' branch in detached state", function () {
     {
         protected function safeExec(string $command): ?string
         {
+            if (str_contains($command, 'log -1 --format=%s')) {
+                return 'chore: detached head state';
+            }
+
             if (str_contains($command, 'rev-parse --abbrev-ref HEAD')) {
                 return 'HEAD';
             }
@@ -98,14 +111,18 @@ it("returns 'HEAD' branch in detached state", function () {
             $escaped = escapeshellarg($repoPath);
 
             $branch = $this->safeExec(
-                'git -C '.$escaped.' rev-parse --abbrev-ref HEAD 2>/dev/null'
+                'git -C '.$escaped.' rev-parse --abbrev-ref HEAD'
             );
 
             $commit = $this->safeExec(
-                'git -C '.$escaped.' rev-parse --short HEAD 2>/dev/null'
+                'git -C '.$escaped.' rev-parse --short HEAD'
             );
 
-            return ['branch' => $branch, 'commit' => $commit];
+            $message = $this->safeExec(
+                'git -C '.$escaped.' log -1 --format=%s'
+            );
+
+            return ['branch' => $branch, 'commit' => $commit, 'message' => $message];
         }
     };
 
@@ -113,6 +130,7 @@ it("returns 'HEAD' branch in detached state", function () {
 
     expect($result['branch'])->toBe('HEAD');
     expect($result['commit'])->toBe('def5678');
+    expect($result['message'])->toBe('chore: detached head state');
 });
 
 it('returns null values when git command fails', function () {
@@ -132,14 +150,18 @@ it('returns null values when git command fails', function () {
             $escaped = escapeshellarg($repoPath);
 
             $branch = $this->safeExec(
-                'git -C '.$escaped.' rev-parse --abbrev-ref HEAD 2>/dev/null'
+                'git -C '.$escaped.' rev-parse --abbrev-ref HEAD'
             );
 
             $commit = $this->safeExec(
-                'git -C '.$escaped.' rev-parse --short HEAD 2>/dev/null'
+                'git -C '.$escaped.' rev-parse --short HEAD'
             );
 
-            return ['branch' => $branch, 'commit' => $commit];
+            $message = $this->safeExec(
+                'git -C '.$escaped.' log -1 --format=%s'
+            );
+
+            return ['branch' => $branch, 'commit' => $commit, 'message' => $message];
         }
     };
 
@@ -147,6 +169,7 @@ it('returns null values when git command fails', function () {
 
     expect($result['branch'])->toBeNull();
     expect($result['commit'])->toBeNull();
+    expect($result['message'])->toBeNull();
 });
 
 it('returns null branch when only commit succeeds', function () {
@@ -154,8 +177,12 @@ it('returns null branch when only commit succeeds', function () {
     {
         protected function safeExec(string $command): ?string
         {
+            if (str_contains($command, 'log -1 --format=%s')) {
+                return 'fix: partial return test';
+            }
+
             if (str_contains($command, 'rev-parse --abbrev-ref HEAD')) {
-                return null; // branch fails
+                return null;
             }
 
             if (str_contains($command, 'rev-parse --short HEAD')) {
@@ -174,14 +201,18 @@ it('returns null branch when only commit succeeds', function () {
             $escaped = escapeshellarg($repoPath);
 
             $branch = $this->safeExec(
-                'git -C '.$escaped.' rev-parse --abbrev-ref HEAD 2>/dev/null'
+                'git -C '.$escaped.' rev-parse --abbrev-ref HEAD'
             );
 
             $commit = $this->safeExec(
-                'git -C '.$escaped.' rev-parse --short HEAD 2>/dev/null'
+                'git -C '.$escaped.' rev-parse --short HEAD'
             );
 
-            return ['branch' => $branch, 'commit' => $commit];
+            $message = $this->safeExec(
+                'git -C '.$escaped.' log -1 --format=%s'
+            );
+
+            return ['branch' => $branch, 'commit' => $commit, 'message' => $message];
         }
     };
 
@@ -189,6 +220,7 @@ it('returns null branch when only commit succeeds', function () {
 
     expect($result['branch'])->toBeNull();
     expect($result['commit'])->toBe('def5678');
+    expect($result['message'])->toBe('fix: partial return test');
 });
 
 it('resolves repo path from git_path config (D-09)', function () {
@@ -233,6 +265,7 @@ it('returns error entry for non-repo path', function () {
                 return [
                     'branch' => null,
                     'commit' => null,
+                    'message' => null,
                     'error' => 'Not a git repository: '.$repoPath,
                 ];
             }

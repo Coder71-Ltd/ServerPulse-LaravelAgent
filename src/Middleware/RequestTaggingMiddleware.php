@@ -116,7 +116,7 @@ class RequestTaggingMiddleware
             Http::withHeaders([
                 'Content-Type' => 'application/json',
                 'X-Agent-Version' => '1.0',
-                'X-API-Key' => ConfigService::API_KEY,
+                'X-API-Key' => config('services.serverpulse.api_key'),
             ])->withOptions(['timeout' => 5, 'connect_timeout' => 3])
                 ->post($apiBase.'/v1/agent/report', $payload);
 
