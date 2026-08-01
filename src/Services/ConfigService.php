@@ -6,10 +6,6 @@ use Illuminate\Support\Facades\Http;
 
 class ConfigService
 {
-    public const API_BASE = 'https://serverpulse.coder71.com';
-
-    public const API_KEY = 'sp_dev_agent_key_002';
-
     private const CACHE_TTL = 300;
 
     /**
@@ -64,7 +60,7 @@ class ConfigService
         try {
             $response = Http::withHeaders([
                 'X-Agent-Version' => '1.0',
-                'X-API-Key' => self::API_KEY,
+                'X-API-Key' => config('services.serverpulse.api_key'),
             ])->get($this->resolveApiBase().'/v1/agent/config');
 
             if ($response->status() === 200) {
@@ -109,7 +105,7 @@ class ConfigService
             return $cached['__api_base_url'];
         }
 
-        return self::API_BASE;
+        return config('services.serverpulse.api_base', 'https://api.serverpulse.io');
     }
 
     /**

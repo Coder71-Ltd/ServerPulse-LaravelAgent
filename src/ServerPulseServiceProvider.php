@@ -26,6 +26,11 @@ class ServerPulseServiceProvider extends ServiceProvider
 {
     public function register(): void
     {
+        $this->mergeConfigFrom(
+            __DIR__.'/../config/serverpulse.php', 'services.serverpulse'
+        );
+
+
         $this->app->singleton(ConfigService::class);
         $this->app->singleton(ReportService::class);
         $this->app->singleton(ServerPulseHandler::class);
@@ -43,6 +48,10 @@ class ServerPulseServiceProvider extends ServiceProvider
 
     public function boot(): void
     {
+        $this->publishes([
+            __DIR__.'/../config/serverpulse.php' => config_path('serverpulse.php'),
+        ], 'serverpulse-config');
+
         $this->commands([ReportCommand::class]);
 
         $this->callAfterResolving(Kernel::class, function (Kernel $kernel): void {

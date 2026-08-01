@@ -9,6 +9,10 @@ uses(TestCase::class);
 
 beforeEach(function () {
     Http::preventStrayRequests();
+    config([
+        'services.serverpulse.api_base' => 'https://test.example.com',
+        'services.serverpulse.api_key' => 'test_key_123',
+    ]);
 });
 
 function writeTestCache(array $data, ?int $mtimeAgo = null): void
@@ -56,7 +60,7 @@ it('fetches from API when cache is stale and writes fresh cache', function () {
     $apiResponse = ['enabled' => true, 'log_paths' => [['label' => 'laravel', 'path' => '/var/www/storage/logs/laravel.log']], 'git_paths' => [['label' => 'main', 'path' => '/var/www']], 'collect' => ['server' => true]];
 
     Http::fake([
-        'serverpulse.coder71.com/*' => Http::response($apiResponse, 200),
+        'test.example.com/*' => Http::response($apiResponse, 200),
     ]);
 
     $service = new ConfigService(tempCachePath());
@@ -65,10 +69,10 @@ it('fetches from API when cache is stale and writes fresh cache', function () {
     expect($result)->toBe($apiResponse);
 
     Http::assertSent(function (Request $request) {
-        return $request->url() === 'https://serverpulse.coder71.com/v1/agent/config'
+        return $request->url() === 'https://test.example.com/v1/agent/config'
             && $request->method() === 'GET'
             && $request->header('X-Agent-Version')[0] === '1.0'
-            && ($request->header('X-API-Key')[0] ?? '') === 'sp_dev_agent_key_002';
+            && ($request->header('X-API-Key')[0] ?? '') === 'test_key_123';
     });
 
     $cachedContents = json_decode(file_get_contents(tempCachePath()), true);
@@ -77,7 +81,7 @@ it('fetches from API when cache is stale and writes fresh cache', function () {
 
 it('writes disabled config and returns it on HTTP 410', function () {
     Http::fake([
-        'serverpulse.coder71.com/*' => Http::response(['error' => 'agent_disabled'], 410),
+        'test.example.com/*' => Http::response(['error' => 'agent_disabled'], 410),
     ]);
 
     $service = new ConfigService(tempCachePath());
@@ -94,7 +98,7 @@ it('uses stale cache when API throws network error', function () {
     writeTestCache($staleCache, mtimeAgo: 400);
 
     Http::fake([
-        'serverpulse.coder71.com/*' => function () {
+        'test.example.com/*' => function () {
             throw new Exception('Connection refused');
         },
     ]);
@@ -107,7 +111,7 @@ it('uses stale cache when API throws network error', function () {
 
 it('uses fallback defaults when no cache and API is unreachable', function () {
     Http::fake([
-        'serverpulse.coder71.com/*' => Http::response(null, 500),
+        'test.example.com/*' => Http::response(null, 500),
     ]);
 
     $service = new ConfigService(tempCachePath());
@@ -132,7 +136,7 @@ it('uses cache at 299 seconds (within TTL) but fetches at 300 seconds', function
 
     $apiResponse = ['enabled' => true, 'log_paths' => [], 'git_paths' => [], 'collect' => ['server' => true]];
     Http::fake([
-        'serverpulse.coder71.com/*' => Http::response($apiResponse, 200),
+        'test.example.com/*' => Http::response($apiResponse, 200),
     ]);
 
     $expiredResult = $service->get();

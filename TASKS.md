@@ -163,7 +163,7 @@
 
 | Field | Value |
 |---|---|
-| **Status** | ⬜ Pending |
+| **Status** | ✅ Done |
 | **Priority** | High |
 | **Depends on** | TASK-04 |
 | **Estimated effort (manual)** | 2-3 hours |
@@ -207,7 +207,7 @@
 
 | Field | Value |
 |---|---|
-| **Status** | ⬜ Pending |
+| **Status** | ✅ Done |
 | **Priority** | High |
 | **Depends on** | TASK-04 |
 | **Estimated effort (manual)** | 1-2 hours |
@@ -265,7 +265,7 @@
 
 | Field | Value |
 |---|---|
-| **Status** | ⬜ Pending |
+| **Status** | ✅ Done |
 | **Priority** | High |
 | **Depends on** | TASK-04 |
 | **Estimated effort (manual)** | 2-3 hours |
@@ -304,7 +304,7 @@
 
 | Field | Value |
 |---|---|
-| **Status** | ⬜ Pending |
+| **Status** | ✅ Done |
 | **Priority** | High |
 | **Depends on** | TASK-04 |
 | **Estimated effort (manual)** | 2-3 hours |
@@ -342,7 +342,7 @@
 
 | Field | Value |
 |---|---|
-| **Status** | ⬜ Pending |
+| **Status** | ✅ Done |
 | **Priority** | High |
 | **Depends on** | TASK-04 |
 | **Estimated effort (manual)** | 2-3 hours |
@@ -386,7 +386,7 @@
 
 | Field | Value |
 |---|---|
-| **Status** | ⬜ Pending |
+| **Status** | ✅ Done |
 | **Priority** | Medium |
 | **Depends on** | TASK-04 |
 | **Estimated effort (manual)** | 1-2 hours |
@@ -418,7 +418,7 @@
 
 | Field | Value |
 |---|---|
-| **Status** | ⬜ Pending |
+| **Status** | ✅ Done |
 | **Priority** | High |
 | **Depends on** | TASK-04 |
 | **Estimated effort (manual)** | 4-5 hours |
@@ -661,7 +661,7 @@
 
 | Field | Value |
 |---|---|
-| **Status** | ⬜ Pending |
+| **Status** | ✅ Done |
 | **Priority** | Medium |
 | **Depends on** | TASK-02 |
 | **Estimated effort (manual)** | 1-2 hours |
@@ -828,10 +828,12 @@ TASK-01 (Scaffolding)
 
 | Total Tasks | 20 |
 |---|---|
+| Completed | 17 (TASK-01 through TASK-17) |
+| Remaining | 3 (TASK-18, TASK-19, TASK-20) |
 | Total Subtasks | ~50 |
 | Estimated total effort (manual) | 40-55 hours |
 | **Estimated total effort (opencode)** | **12-20 hours** |
-| Phase 1 (Core): TASK-01 through TASK-04, TASK-14, TASK-15 | Foundation + command cycle |
-| Phase 2 (Collectors): TASK-05 through TASK-13 | All metric collection |
-| Phase 3 (Integration): TASK-16 through TASK-19 | Middleware, Monolog, Facade, Testing |
-| Phase 4 (Release): TASK-20 | Docs and publish |
+| Phase 1 (Core): TASK-01 through TASK-04, TASK-14, TASK-15 | Foundation + command cycle ✅ |
+| Phase 2 (Collectors): TASK-05 through TASK-13 | All metric collection ✅ |
+| Phase 3 (Integration): TASK-16 through TASK-19 | Middleware ✅, Monolog ✅, Facade (TASK-18 ⬜), E2E Testing (TASK-19 ⬜) |
+| Phase 4 (Release): TASK-20 ⬜ | Docs and publish |

@@ -40,11 +40,11 @@ artisan serverpulse:report (every 60s)
 
 **Problem:** If the ServerPulse API migrates to a new domain, agents hardcoded with the old URL can never reach the new endpoint.
 
-**Solution:** The `GET /v1/agent/config` endpoint can optionally include an `api_base_url` field in its response. `ConfigService` stores this in the cache file and uses it for all subsequent API calls, overriding the hardcoded `API_BASE` constant.
+**Solution:** The `GET /v1/agent/config` endpoint can optionally include an `api_base_url` field in its response. `ConfigService` stores this in the cache file and uses it for all subsequent API calls, overriding the configured `api_base_url`.
 
 ```
 First run:
-  → Hardcoded API_BASE = 'https://api.serverpulse.io'
+  → Config api_base_url = 'https://api.serverpulse.io'
   → GET https://api.serverpulse.io/v1/agent/config
   → Response: { ..., "api_base_url": "https://new-api.example.com" }
   → Cached: { ..., "__api_base_url": "https://new-api.example.com" }
@@ -55,8 +55,8 @@ Subsequent runs:
 ```
 
 **Key behaviors:**
-- `API_BASE` constant is the bootstrap default (first-ever run, no cache)
-- `resolveApiBase()` checks cache for `__api_base_url` → falls back to constant
+- `config('services.serverpulse.api_base')` is the bootstrap default
+- `resolveApiBase()` checks cache for `__api_base_url` → falls back to config value
 - Server can migrate all agents progressively as they refresh config every 5 minutes
 - Zero client interaction required
 
@@ -83,7 +83,6 @@ All code follows Red → Green → Refactor:
 ### Package Structure
 
 ```
-apps/agent/
 ├── src/
 │   ├── ServerPulseServiceProvider.php
 │   ├── Console/Commands/
@@ -97,6 +96,8 @@ apps/agent/
 │   ├── Middleware/
 │   ├── Monolog/
 │   └── Facades/
+├── config/
+│   └── serverpulse.php
 ├── tests/
 │   ├── Unit/
 │   │   ├── Services/
@@ -111,11 +112,4 @@ apps/agent/
 
 ### Progress
 
-Tracked in `TASKS.md`. Current status:
-- ✅ TASK-01 — Project Scaffolding
-- ✅ TASK-02 — ServerPulseServiceProvider
-- ✅ TASK-03 — ConfigService
-- ⬜ TASK-04 — CollectorInterface & Base Patterns
-- ⬜ TASK-05 through TASK-20 — Pending
-
-Full task breakdown: see [TASKS.md](TASKS.md)
+Tracked in `TASKS.md`.

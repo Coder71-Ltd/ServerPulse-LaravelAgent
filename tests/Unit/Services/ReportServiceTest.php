@@ -9,11 +9,15 @@ uses(TestCase::class);
 
 beforeEach(function () {
     Http::preventStrayRequests();
+    config([
+        'services.serverpulse.api_base' => 'https://test.example.com',
+        'services.serverpulse.api_key' => 'test_key_123',
+    ]);
 });
 
 it('sends payload and returns success on 202', function () {
     Http::fake([
-        'serverpulse.coder71.com/*' => Http::response(['status' => 'accepted'], 202),
+        'test.example.com/*' => Http::response(['status' => 'accepted'], 202),
     ]);
 
     $config = new ConfigService(tempCachePath());
@@ -24,10 +28,10 @@ it('sends payload and returns success on 202', function () {
     expect($result['status'])->toBe(202);
 
     Http::assertSent(function ($request) {
-        return $request->url() === 'https://serverpulse.coder71.com/v1/agent/report'
+        return $request->url() === 'https://test.example.com/v1/agent/report'
             && $request->method() === 'POST'
             && $request->header('X-Agent-Version')[0] === '1.0'
-            && ($request->header('X-API-Key')[0] ?? '') === 'sp_dev_agent_key_002'
+            && ($request->header('X-API-Key')[0] ?? '') === 'test_key_123'
             && $request['test'] === 'data';
     });
 });
@@ -37,7 +41,7 @@ it('marks agent disabled on 410 response', function () {
     file_put_contents($cachePath, json_encode(['enabled' => true]));
 
     Http::fake([
-        'serverpulse.coder71.com/*' => Http::response(['error' => 'agent_disabled'], 410),
+        'test.example.com/*' => Http::response(['error' => 'agent_disabled'], 410),
     ]);
 
     $config = new ConfigService($cachePath);
@@ -55,7 +59,7 @@ it('marks agent disabled on 410 response', function () {
 
 it('returns failure on network error', function () {
     Http::fake([
-        'serverpulse.coder71.com/*' => function () {
+        'test.example.com/*' => function () {
             throw new Exception('Connection timed out');
         },
     ]);

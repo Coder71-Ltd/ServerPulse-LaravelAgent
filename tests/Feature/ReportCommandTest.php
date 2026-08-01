@@ -7,6 +7,10 @@ use ServerPulse\Agent\Services\ConfigService;
 beforeEach(function () {
     $this->app->register(ServerPulseServiceProvider::class);
     Http::preventStrayRequests();
+    config([
+        'services.serverpulse.api_base' => 'https://test.example.com',
+        'services.serverpulse.api_key' => 'test_key_123',
+    ]);
 });
 
 afterEach(function () {
@@ -25,7 +29,7 @@ it('runs report command and sends payload to API', function () {
     $this->app->instance(ConfigService::class, new ConfigService($cachePath));
 
     Http::fake([
-        'serverpulse.coder71.com/*' => Http::response(['status' => 'accepted'], 202),
+        'test.example.com/*' => Http::response(['status' => 'accepted'], 202),
     ]);
 
     $this->artisan('serverpulse:report')->assertSuccessful();
@@ -69,7 +73,7 @@ it('prevents concurrent execution via pid lock', function () {
     $this->app->instance(ConfigService::class, new ConfigService($cachePath));
 
     Http::fake([
-        'serverpulse.coder71.com/*' => Http::response(['status' => 'accepted'], 202),
+        'test.example.com/*' => Http::response(['status' => 'accepted'], 202),
     ]);
 
     $lockFile = sys_get_temp_dir().DIRECTORY_SEPARATOR.'serverpulse.lock';
