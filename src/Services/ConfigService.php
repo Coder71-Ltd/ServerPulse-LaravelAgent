@@ -60,6 +60,7 @@ class ConfigService
         try {
             $response = Http::withHeaders([
                 'X-Agent-Version' => '1.0',
+                'X-Agent-Domain' => $this->resolveAgentDomain(),
                 'X-API-Key' => config('services.serverpulse.api_key'),
             ])->get($this->resolveApiBase().'/v1/agent/config');
 
@@ -106,6 +107,21 @@ class ConfigService
         }
 
         return config('services.serverpulse.api_base', 'https://api.serverpulse.io');
+    }
+
+    private function resolveAgentDomain(): string
+    {
+        if (! empty($_SERVER['HTTP_HOST'])) {
+            return $_SERVER['HTTP_HOST'];
+        }
+
+        $hostname = gethostname();
+
+        if ($hostname !== false && $hostname !== '') {
+            return $hostname;
+        }
+
+        return 'unknown';
     }
 
     /**

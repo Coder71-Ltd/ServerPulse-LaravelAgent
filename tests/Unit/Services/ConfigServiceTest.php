@@ -72,6 +72,7 @@ it('fetches from API when cache is stale and writes fresh cache', function () {
         return $request->url() === 'https://test.example.com/v1/agent/config'
             && $request->method() === 'GET'
             && $request->header('X-Agent-Version')[0] === '1.0'
+            && is_string($request->header('X-Agent-Domain')[0] ?? null)
             && ($request->header('X-API-Key')[0] ?? '') === 'test_key_123';
     });
 
