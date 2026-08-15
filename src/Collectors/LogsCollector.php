@@ -268,16 +268,24 @@ class LogsCollector extends BaseCollector
     /**
      * Parse log output and extract structured Monolog entries.
      *
+     * Only entries matching the reporting date (today) are kept; older
+     * entries are dropped so the payload reflects the current day only.
+     *
      * @param  string  $output  Raw log lines
      * @return array{path: string, count: int, entries: array<int, array{datetime: string, message: string, level: string}>}
      */
     private function parseLogOutput(string $path, string $output): array
     {
+        $reportingDate = $this->reportingDate();
         $lines = explode("\n", $output);
         $entries = [];
 
         foreach ($lines as $line) {
             if (preg_match(self::MONOLOG_REGEX, $line, $matches)) {
+                if (substr($matches[1], 0, 10) !== $reportingDate) {
+                    continue;
+                }
+
                 $entries[] = [
                     'datetime' => $matches[1],
                     'message' => trim($matches[4]),
@@ -294,5 +302,20 @@ class LogsCollector extends BaseCollector
             'count' => $count,
             'entries' => $capped,
         ];
+    }
+
+    /**
+     * The date (YYYY-MM-DD) used to filter log entries.
+     *
+     * Defaults to the current local date, honoring Laravel's timezone
+     * when available so the filter matches the report timestamp.
+     */
+    protected function reportingDate(): string
+    {
+        if (function_exists('now')) {
+            return now()->format('Y-m-d');
+        }
+
+        return date('Y-m-d');
     }
 }

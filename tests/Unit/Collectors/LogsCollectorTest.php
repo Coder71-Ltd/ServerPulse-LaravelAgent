@@ -38,6 +38,15 @@ function createTempLog(string $content): string
     return $path;
 }
 
+/**
+ * Today's date (YYYY-MM-DD) used in log entry fixtures so entries
+ * match the collector's reporting-date filter.
+ */
+function reportDate(): string
+{
+    return date('Y-m-d');
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -50,7 +59,7 @@ it('returns all log result keys', function () {
 });
 
 it('parses Monolog ERROR line correctly', function () {
-    $tempFile = createTempLog('[2026-07-04 10:15:30] production.ERROR: Something broke');
+    $tempFile = createTempLog('['.reportDate().' 10:15:30] production.ERROR: Something broke');
 
     $collector = new class extends LogsCollector
     {
@@ -80,18 +89,18 @@ it('parses Monolog ERROR line correctly', function () {
 
     $entry = $result[0]['entries'][0];
     assertLogEntryKeys($entry);
-    expect($entry['datetime'])->toBe('2026-07-04 10:15:30');
+    expect($entry['datetime'])->toBe(reportDate().' 10:15:30');
     expect($entry['level'])->toBe('ERROR');
     expect($entry['message'])->toBe('Something broke');
 });
 
 it('captures all 5 Monolog levels', function () {
     $lines = implode("\n", [
-        '[2026-07-04 10:15:30] production.ERROR: Error occurred',
-        '[2026-07-04 10:15:31] production.WARNING: Warning occurred',
-        '[2026-07-04 10:15:32] production.CRITICAL: Critical occurred',
-        '[2026-07-04 10:15:33] production.ALERT: Alert occurred',
-        '[2026-07-04 10:15:34] production.EMERGENCY: Emergency occurred',
+        '['.reportDate().' 10:15:30] production.ERROR: Error occurred',
+        '['.reportDate().' 10:15:31] production.WARNING: Warning occurred',
+        '['.reportDate().' 10:15:32] production.CRITICAL: Critical occurred',
+        '['.reportDate().' 10:15:33] production.ALERT: Alert occurred',
+        '['.reportDate().' 10:15:34] production.EMERGENCY: Emergency occurred',
     ]);
 
     $tempFile = createTempLog($lines);
@@ -152,7 +161,7 @@ it('copes entries at 100', function () {
     $levels = ['ERROR', 'WARNING', 'CRITICAL', 'ALERT', 'EMERGENCY'];
     for ($i = 0; $i < 150; $i++) {
         $level = $levels[$i % 5];
-        $lines[] = "[2026-07-04 10:00:00] production.{$level}: Log entry {$i}";
+        $lines[] = '['.reportDate()." 10:00:00] production.{$level}: Log entry {$i}";
     }
     $content = implode("\n", $lines);
 
@@ -186,9 +195,9 @@ it('copes entries at 100', function () {
 
 it('handles non-Monolog lines gracefully', function () {
     $lines = implode("\n", [
-        '[2026-07-04 10:15:30] production.INFO: Just info — not counted',
-        '[2026-07-04 10:15:31] production.DEBUG: Debug message — not counted',
-        '[2026-07-04 10:15:32] Some random non-log message',
+        '['.reportDate().' 10:15:30] production.INFO: Just info — not counted',
+        '['.reportDate().' 10:15:31] production.DEBUG: Debug message — not counted',
+        '['.reportDate().' 10:15:32] Some random non-log message',
         '',
         'Plain text line with no brackets',
     ]);
@@ -223,11 +232,11 @@ it('handles non-Monolog lines gracefully', function () {
 
 it('parses multi-line entries from fake tail', function () {
     $lines = implode("\n", [
-        '[2026-07-04 10:15:30] production.ERROR: First error',
+        '['.reportDate().' 10:15:30] production.ERROR: First error',
         'Some non-matching line',
-        '[2026-07-04 10:15:31] production.CRITICAL: Critical issue',
+        '['.reportDate().' 10:15:31] production.CRITICAL: Critical issue',
         'Another non-matching line',
-        '[2026-07-04 10:15:32] production.WARNING: Warning message',
+        '['.reportDate().' 10:15:32] production.WARNING: Warning message',
     ]);
 
     $tempFile = createTempLog($lines);
@@ -277,7 +286,7 @@ it('handles base collector exception wrapping', function () {
 });
 
 it('handles unreadable file returns zero count', function () {
-    $tempFile = createTempLog('[2026-07-04 10:15:30] production.ERROR: Readable file error');
+    $tempFile = createTempLog('['.reportDate().' 10:15:30] production.ERROR: Readable file error');
 
     $collector = new class extends LogsCollector
     {
@@ -313,8 +322,8 @@ it('handles unreadable file returns zero count', function () {
 });
 
 it('normalizes object-format log paths', function () {
-    $tempFile1 = createTempLog('[2026-07-04 10:15:30] production.ERROR: First app error');
-    $tempFile2 = createTempLog('[2026-07-04 10:15:31] production.WARNING: Worker warning');
+    $tempFile1 = createTempLog('['.reportDate().' 10:15:30] production.ERROR: First app error');
+    $tempFile2 = createTempLog('['.reportDate().' 10:15:31] production.WARNING: Worker warning');
 
     $collector = new class extends LogsCollector
     {
@@ -353,8 +362,8 @@ it('normalizes object-format log paths', function () {
 });
 
 it('reads log files via PHP fallback when shell is unavailable', function () {
-    $content = "[2026-08-01 10:15:30] production.ERROR: Shell offline error\n";
-    $content .= "[2026-08-01 10:15:31] production.CRITICAL: PHP fallback test\n";
+    $content = '['.reportDate()." 10:15:30] production.ERROR: Shell offline error\n";
+    $content .= '['.reportDate()." 10:15:31] production.CRITICAL: PHP fallback test\n";
 
     $tempFile = createTempLog($content);
 
@@ -404,9 +413,9 @@ it('expands directory log_path into its *.log files', function () {
     $dir = sys_get_temp_dir().DIRECTORY_SEPARATOR.'sp_logdir_'.uniqid();
     mkdir($dir);
 
-    $fileA = $dir.DIRECTORY_SEPARATOR.'laravel-2026-08-01.log';
+    $fileA = $dir.DIRECTORY_SEPARATOR.'laravel-'.reportDate().'.log';
     $fileB = $dir.DIRECTORY_SEPARATOR.'laravel-2026-07-30.log';
-    file_put_contents($fileA, "[2026-08-01 10:00:00] production.ERROR: Latest error\n");
+    file_put_contents($fileA, '['.reportDate()." 10:00:00] production.ERROR: Latest error\n");
     file_put_contents($fileB, "[2026-07-30 10:00:00] production.WARNING: Older warning\n");
 
     $collector = new class extends LogsCollector
@@ -439,8 +448,8 @@ it('expands directory log_path into its *.log files', function () {
     expect($result[0]['count'])->toBe(1);
     expect($result[0]['entries'][0]['message'])->toBe('Latest error');
     expect($result[1]['path'])->toBe(str_replace('\\', '/', $fileB));
-    expect($result[1]['count'])->toBe(1);
-    expect($result[1]['entries'][0]['message'])->toBe('Older warning');
+    expect($result[1]['count'])->toBe(0);
+    expect($result[1]['entries'])->toBe([]);
 });
 
 it('returns single zero-count result for a directory without log files', function () {
@@ -478,7 +487,7 @@ it('caps directory scan at 10 newest log files', function () {
     for ($i = 1; $i <= 12; $i++) {
         $day = str_pad((string) $i, 2, '0', STR_PAD_LEFT);
         $file = $dir.DIRECTORY_SEPARATOR.'laravel-2026-08-'.$day.'.log';
-        file_put_contents($file, "[2026-08-{$day} 10:00:00] production.ERROR: Error {$i}\n");
+        file_put_contents($file, '['.reportDate()." 10:00:00] production.ERROR: Error {$i}\n");
         $paths[] = $file;
     }
 
@@ -514,4 +523,45 @@ it('caps directory scan at 10 newest log files', function () {
         expect($fileResult['count'])->toBe(1);
         expect($fileResult['entries'][0]['level'])->toBe('ERROR');
     }
+});
+
+it('only keeps entries from the reporting date', function () {
+    $lines = implode("\n", [
+        '['.reportDate().' 10:15:30] production.ERROR: Today error',
+        '[2026-07-04 10:15:31] production.CRITICAL: Old critical',
+        '['.reportDate().' 10:15:32] production.WARNING: Today warning',
+        '[2026-08-01 10:15:33] production.ERROR: Old error',
+    ]);
+
+    $tempFile = createTempLog($lines);
+
+    $collector = new class extends LogsCollector
+    {
+        protected function safeExec(string $command): ?string
+        {
+            if (preg_match('/tail -n 1000 (.+) 2>\\/dev\\/null/', $command, $m)) {
+                $maybePath = trim($m[1], " \"'");
+                if (file_exists($maybePath)) {
+                    return file_get_contents($maybePath);
+                }
+            }
+
+            return null;
+        }
+    };
+
+    $result = $collector->collect([
+        'log_paths' => [$tempFile],
+    ]);
+
+    unlink($tempFile);
+
+    expect($result)->toHaveCount(1);
+    expect($result[0]['count'])->toBe(2);
+
+    $messages = array_map(fn ($e) => $e['message'], $result[0]['entries']);
+    expect($messages)->toContain('Today error');
+    expect($messages)->toContain('Today warning');
+    expect($messages)->not->toContain('Old critical');
+    expect($messages)->not->toContain('Old error');
 });
