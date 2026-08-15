@@ -71,6 +71,32 @@ function makeServerCollector(array $procFiles = [], array $files = [], array $sh
     };
 }
 
+/**
+ * Windows variant of makeServerCollector: routes doCollect through the real
+ * collectWindowsMetrics() path while stubbing the process execution
+ * (runWindowsProbe) so no real PowerShell is spawned during tests.
+ */
+function makeWindowsServerCollector(?string $probeOutput = null): ServerCollector
+{
+    return new class($probeOutput) extends ServerCollector
+    {
+        public function __construct(
+            private readonly ?string $probeOutput,
+        ) {}
+
+        protected function runWindowsProbe(): ?string
+        {
+            return $this->probeOutput;
+        }
+
+        protected function doCollect(array $config): array
+        {
+            // D-10 bypass only — the metric math is the production code path.
+            return $this->collectWindowsMetrics();
+        }
+    };
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -224,4 +250,97 @@ it('regression: disk_used_gb is computed from exact bytes, not rounded gb', func
 
     expect($result['disk_used_gb'])->toBe(0.5);
     expect($result['disk_percent'])->toBe(50.0);
+});
+
+// ---------------------------------------------------------------------------
+// Windows metric collection
+// ---------------------------------------------------------------------------
+
+it('windows: parses real metrics from the PowerShell probe', function () {
+    $collector = makeWindowsServerCollector('12|16598604|5977956|17848|16');
+
+    $result = $collector->collect([]);
+
+    expect($result['cpu_percent'])->toBe(12.0);
+    expect($result['cpu_cores'])->toBe(16);
+    expect($result['ram_total_mb'])->toBe(16209.6);
+    expect($result['ram_used_mb'])->toBe(10371.7);
+    expect($result['ram_percent'])->toBe(64.0);
+    expect($result['uptime_seconds'])->toBe(17848);
+    expect($result['load_avg_1m'])->toBeNull();
+    expect($result['load_avg_5m'])->toBeNull();
+    expect($result['load_avg_15m'])->toBeNull();
+    expect($result['disk_total_gb'])->toBeFloat();
+});
+
+it('windows: returns nulls when probe fails but keeps disk + env cores', function () {
+    $collector = makeWindowsServerCollector();
+
+    $result = $collector->collect([]);
+
+    expect($result['cpu_percent'])->toBeNull();
+    expect($result['ram_total_mb'])->toBeNull();
+    expect($result['ram_used_mb'])->toBeNull();
+    expect($result['ram_percent'])->toBeNull();
+    expect($result['uptime_seconds'])->toBeNull();
+
+    $envCores = getenv('NUMBER_OF_PROCESSORS');
+    $expectedCores = is_string($envCores) && is_numeric($envCores) ? (int) $envCores : 1;
+    expect($result['cpu_cores'])->toBe($expectedCores);
+
+    expect($result['disk_total_gb'])->toBeFloat();
+});
+
+it('windows: returns nulls for malformed probe output', function () {
+    $collector = makeWindowsServerCollector('12|16598604');
+
+    $result = $collector->collect([]);
+
+    expect($result['cpu_percent'])->toBeNull();
+    expect($result['ram_total_mb'])->toBeNull();
+    expect($result['ram_used_mb'])->toBeNull();
+    expect($result['ram_percent'])->toBeNull();
+    expect($result['uptime_seconds'])->toBeNull();
+});
+
+it('windows: returns nulls for zero total ram', function () {
+    $collector = makeWindowsServerCollector('5|0|0|100|8');
+
+    $result = $collector->collect([]);
+
+    expect($result['ram_total_mb'])->toBeNull();
+    expect($result['ram_used_mb'])->toBeNull();
+    expect($result['ram_percent'])->toBeNull();
+});
+
+it('windows: falls back to env cores when probe reports zero cores', function () {
+    $collector = makeWindowsServerCollector('5|100000|50000|100|0');
+
+    $result = $collector->collect([]);
+
+    $envCores = getenv('NUMBER_OF_PROCESSORS');
+    $expectedCores = is_string($envCores) && is_numeric($envCores) ? (int) $envCores : 1;
+
+    expect($result['cpu_cores'])->toBe($expectedCores);
+    expect($result['ram_total_mb'])->toBe(97.7);
+    expect($result['ram_used_mb'])->toBe(48.8);
+    expect($result['ram_percent'])->toBe(50.0);
+    expect($result['uptime_seconds'])->toBe(100);
+});
+
+it('windows: runWindowsProbe returns null when shell is unavailable', function () {
+    $collector = new class extends ServerCollector
+    {
+        protected function isShellAvailable(): bool
+        {
+            return false;
+        }
+
+        public function probeForTest(): ?string
+        {
+            return $this->runWindowsProbe();
+        }
+    };
+
+    expect($collector->probeForTest())->toBeNull();
 });

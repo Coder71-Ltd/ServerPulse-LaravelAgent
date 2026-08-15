@@ -8,6 +8,13 @@ class ServerCollector extends BaseCollector
 {
     use ExecutesShellCommands;
 
+    /**
+     * Hard cap on how long the Windows probe may take. A stuck CIM/WMI
+     * query must never stall the report cycle, so the probe is terminated
+     * past this budget and metrics fall back to nulls.
+     */
+    private const WINDOWS_PROBE_TIMEOUT = 5.0;
+
     public function key(): string
     {
         return 'server';
@@ -24,12 +31,218 @@ class ServerCollector extends BaseCollector
      */
     protected function doCollect(array $config): array
     {
-        // D-10: Non-Linux early exit — no /proc filesystem available
-        if (PHP_OS_FAMILY !== 'Linux') {
-            return $this->nullResult();
+        // Linux: /proc + sys_getloadavg (SRV-01..SRV-08)
+        if (PHP_OS_FAMILY === 'Linux') {
+            return $this->collectMetrics();
         }
 
-        return $this->collectMetrics();
+        // Windows: PowerShell CIM probe + PHP builtin disk functions
+        if (PHP_OS_FAMILY === 'Windows') {
+            return $this->collectWindowsMetrics();
+        }
+
+        // Other platforms: no reliable sources — all nulls (D-10)
+        return $this->nullResult();
+    }
+
+    /**
+     * Windows metric collection via a single PowerShell/CIM probe.
+     *
+     * Returns real CPU load %, RAM, uptime and core count. Load averages
+     * (1/5/15 min) have no Windows equivalent and remain null. Disk uses
+     * PHP builtins (works on Windows drive roots).
+     *
+     * @return array<string, mixed>
+     */
+    protected function collectWindowsMetrics(): array
+    {
+        try {
+            $system = $this->collectWindowsSystemMetrics();
+
+            if ($system === null) {
+                $ram = ['ram_total_mb' => null, 'ram_used_mb' => null, 'ram_percent' => null];
+                $cores = $this->resolveWindowsCores(0);
+                $cpuPercent = null;
+                $uptime = null;
+            } else {
+                $ram = $this->computeRamFromKb($system['total_kb'], $system['free_kb']);
+                $cores = $system['cores'];
+                $cpuPercent = $system['cpu_percent'];
+                $uptime = $system['uptime_seconds'];
+            }
+
+            // Disk works via PHP builtins on every platform
+            $disk = $this->collectDiskMetrics();
+
+            return [
+                'cpu_percent' => $cpuPercent,
+                'load_avg_1m' => null,
+                'load_avg_5m' => null,
+                'load_avg_15m' => null,
+                'cpu_cores' => $cores,
+                'ram_total_mb' => $ram['ram_total_mb'],
+                'ram_used_mb' => $ram['ram_used_mb'],
+                'ram_percent' => $ram['ram_percent'],
+                'disk_total_gb' => $disk['disk_total_gb'],
+                'disk_used_gb' => $disk['disk_used_gb'],
+                'disk_percent' => $disk['disk_percent'],
+                'uptime_seconds' => $uptime,
+            ];
+        } catch (\Throwable $e) {
+            return $this->nullResult();
+        }
+    }
+
+    /**
+     * Run a single PowerShell probe returning CPU %, RAM (KB), uptime (s)
+     * and core count as a pipe-delimited line.
+     *
+     * @return array{cpu_percent: float, total_kb: int, free_kb: int, uptime_seconds: int, cores: int}|null
+     */
+    private function collectWindowsSystemMetrics(): ?array
+    {
+        $output = $this->runWindowsProbe();
+
+        if ($output === null) {
+            return null;
+        }
+
+        return $this->parseWindowsProbeOutput($output);
+    }
+
+    /**
+     * Execute the PowerShell probe with a hard timeout.
+     *
+     * Output is captured to a temp file and the process status is polled,
+     * because non-blocking reads on pipes are unreliable on Windows. If the
+     * CIM/WMI query hangs past the budget, the process is terminated and
+     * null is returned so the report cycle never stalls.
+     */
+    protected function runWindowsProbe(): ?string
+    {
+        if (! $this->isShellAvailable()) {
+            return null;
+        }
+
+        $stdoutFile = @tempnam(sys_get_temp_dir(), 'spprobe');
+        $stderrFile = @tempnam(sys_get_temp_dir(), 'sperr');
+
+        if ($stdoutFile === false || $stderrFile === false) {
+            return null;
+        }
+
+        $process = @proc_open(
+            $this->windowsSystemCommand(),
+            [
+                1 => ['file', $stdoutFile, 'w'],
+                2 => ['file', $stderrFile, 'w'],
+            ],
+            $pipes
+        );
+
+        if (! is_resource($process)) {
+            @unlink($stdoutFile);
+            @unlink($stderrFile);
+
+            return null;
+        }
+
+        $deadline = microtime(true) + self::WINDOWS_PROBE_TIMEOUT;
+        $timedOut = false;
+
+        while (true) {
+            $status = @proc_get_status($process);
+
+            if (! $status['running']) {
+                break;
+            }
+
+            if (microtime(true) >= $deadline) {
+                $timedOut = true;
+                proc_terminate($process);
+                proc_get_status($process);
+
+                break;
+            }
+
+            usleep(50000);
+        }
+
+        proc_close($process);
+
+        $output = @file_get_contents($stdoutFile);
+
+        @unlink($stdoutFile);
+        @unlink($stderrFile);
+
+        if ($timedOut) {
+            return null;
+        }
+
+        $trimmed = trim((string) $output);
+
+        return $trimmed === '' ? null : $trimmed;
+    }
+
+    /**
+     * Parse the probe output line into typed metrics.
+     *
+     * Pure parsing (no I/O) so it is unit-testable on any platform.
+     *
+     * @return array{cpu_percent: float, total_kb: int, free_kb: int, uptime_seconds: int, cores: int}|null
+     */
+    protected function parseWindowsProbeOutput(string $output): ?array
+    {
+        $parts = explode('|', trim($output));
+
+        if (count($parts) < 5) {
+            return null;
+        }
+
+        $totalKb = (int) $parts[1];
+        $freeKb = (int) $parts[2];
+
+        if ($totalKb <= 0) {
+            return null;
+        }
+
+        return [
+            'cpu_percent' => (float) $parts[0],
+            'total_kb' => $totalKb,
+            'free_kb' => $freeKb,
+            'uptime_seconds' => (int) $parts[3],
+            'cores' => $this->resolveWindowsCores((int) $parts[4]),
+        ];
+    }
+
+    /**
+     * Resolve Windows core count: probe result → NUMBER_OF_PROCESSORS env → 1.
+     */
+    private function resolveWindowsCores(int $probeCores): int
+    {
+        if ($probeCores > 0) {
+            return $probeCores;
+        }
+
+        $envCores = getenv('NUMBER_OF_PROCESSORS');
+
+        if (is_string($envCores) && is_numeric($envCores) && (int) $envCores > 0) {
+            return (int) $envCores;
+        }
+
+        return 1;
+    }
+
+    /**
+     * PowerShell probe used by Windows metric collection.
+     *
+     * Exposed so tests can fixture the exact command string.
+     */
+    protected function windowsSystemCommand(): string
+    {
+        return <<<'CMD'
+powershell -NoProfile -Command "$os=Get-CimInstance Win32_OperatingSystem; $cpu=Get-CimInstance Win32_Processor | Measure-Object -Property LoadPercentage -Average; $s=[string][int]$cpu.Average+'|'+[string]$os.TotalVisibleMemorySize+'|'+[string]$os.FreePhysicalMemory+'|'+[string][int]((Get-Date)-$os.LastBootUpTime).TotalSeconds+'|'+[string]$env:NUMBER_OF_PROCESSORS; Write-Output $s"
+CMD;
     }
 
     /**
@@ -155,13 +368,7 @@ class ServerCollector extends BaseCollector
             $availKb = isset($memInfo['MemAvailable']) ? (int) $memInfo['MemAvailable'] : 0;
 
             if ($totalKb > 0) {
-                $usedKb = $totalKb - $availKb;
-
-                return [
-                    'ram_total_mb' => round($totalKb / 1024, 1),
-                    'ram_used_mb' => round($usedKb / 1024, 1),
-                    'ram_percent' => round(($usedKb / $totalKb) * 100, 1),
-                ];
+                return $this->computeRamFromKb($totalKb, $availKb);
             }
         }
 
@@ -170,6 +377,26 @@ class ServerCollector extends BaseCollector
             'ram_total_mb' => null,
             'ram_used_mb' => null,
             'ram_percent' => null,
+        ];
+    }
+
+    /**
+     * Derive RAM metrics from exact KB values (total and available/free).
+     *
+     * Used/total are computed from exact KB before rounding so
+     * `ram_used_mb` and `ram_percent` stay consistent with each other.
+     * Shared by the Linux (/proc/meminfo) and Windows (CIM) paths.
+     *
+     * @return array{ram_total_mb: float, ram_used_mb: float, ram_percent: float}
+     */
+    protected function computeRamFromKb(int $totalKb, int $freeKb): array
+    {
+        $usedKb = $totalKb - $freeKb;
+
+        return [
+            'ram_total_mb' => round($totalKb / 1024, 1),
+            'ram_used_mb' => round($usedKb / 1024, 1),
+            'ram_percent' => round(($usedKb / $totalKb) * 100, 1),
         ];
     }
 
