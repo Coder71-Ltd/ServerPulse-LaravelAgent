@@ -258,11 +258,7 @@ CMD;
             // CPU metrics (SRV-01, SRV-02, SRV-03)
             $load = $this->collectLoadAverages();
             $cores = $this->collectCpuCores();
-
-            $cpuPercent = null;
-            if ($load['load_avg_1m'] !== null && $cores > 0) {
-                $cpuPercent = round(($load['load_avg_1m'] / $cores) * 100, 1);
-            }
+            $cpuPercent = $this->collectCpuPercent($cores, $load['load_avg_1m']);
 
             // RAM metrics (SRV-04, SRV-05)
             $ram = $this->collectRamMetrics();
@@ -301,7 +297,7 @@ CMD;
      */
     private function collectLoadAverages(): array
     {
-        $load = function_exists('sys_getloadavg') ? sys_getloadavg() : false;
+        $load = $this->loadAverages();
 
         if ($load === false) {
             return [
@@ -319,25 +315,200 @@ CMD;
     }
 
     /**
+     * Raw load-average source (sys_getloadavg), exposed so tests can
+     * inject deterministic values on any platform.
+     *
+     * @return array{0: float, 1: float, 2: float}|false
+     */
+    protected function loadAverages(): array|false
+    {
+        return function_exists('sys_getloadavg') ? sys_getloadavg() : false;
+    }
+
+    /**
+     * Collect real CPU utilization (0–100%) from /proc/stat deltas.
+     *
+     * A tick snapshot (total/idle + timestamp) is persisted between runs;
+     * the busy/idle delta over the interval yields utilization comparable
+     * to top/aaPanel. The first run has no baseline, so it falls back to
+     * a load-average estimate capped at 100% (never misleadingly >100).
+     *
+     * @return float|null Percentage in [0, 100], or null when no source works
+     */
+    private function collectCpuPercent(int $cores, ?float $loadAvg1m): ?float
+    {
+        $stat = $this->readProcStat();
+
+        if ($stat !== null) {
+            $snapshot = $this->readCpuSnapshot();
+            $this->writeCpuSnapshot($stat);
+
+            if ($snapshot !== null) {
+                $totalDelta = $stat['total'] - $snapshot['total'];
+                $idleDelta = $stat['idle'] - $snapshot['idle'];
+
+                if ($totalDelta > 0) {
+                    $busy = max(0, $totalDelta - $idleDelta);
+                    $percent = ($busy / $totalDelta) * 100;
+
+                    return round(min(100.0, $percent), 1);
+                }
+            }
+        }
+
+        // First run (no baseline) or /proc/stat unavailable:
+        // load-based estimate, capped at 100 so it never looks like >100% CPU.
+        if ($loadAvg1m !== null && $cores > 0) {
+            return round(min(100.0, ($loadAvg1m / $cores) * 100), 1);
+        }
+
+        return null;
+    }
+
+    /**
+     * Read and parse the first line of /proc/stat (cpu aggregate).
+     *
+     * @return array{total: int, idle: int}|null
+     */
+    private function readProcStat(): ?array
+    {
+        $contents = $this->safeFileGet('/proc/stat');
+
+        if ($contents === null) {
+            return null;
+        }
+
+        $firstLine = strtok($contents, "\n");
+
+        if ($firstLine === false || ! str_starts_with($firstLine, 'cpu ')) {
+            return null;
+        }
+
+        $parts = preg_split('/\s+/', trim($firstLine));
+
+        if ($parts === false || count($parts) < 5) {
+            return null;
+        }
+
+        // Fields: user nice system idle iowait irq softirq steal ...
+        // Idle includes idle + iowait so I/O wait isn't counted as busy.
+        $total = 0;
+
+        for ($i = 1, $len = count($parts); $i < $len; $i++) {
+            if (is_numeric($parts[$i])) {
+                $total += (int) $parts[$i];
+            }
+        }
+
+        $idle = (int) $parts[4] + ((int) ($parts[5] ?? 0));
+
+        if ($total <= 0) {
+            return null;
+        }
+
+        return ['total' => $total, 'idle' => $idle];
+    }
+
+    /**
+     * Read a previously persisted CPU tick snapshot.
+     *
+     * @return array{total: int, idle: int, time: float}|null
+     */
+    private function readCpuSnapshot(): ?array
+    {
+        $path = $this->cpuSnapshotPath();
+
+        if (! is_readable($path)) {
+            return null;
+        }
+
+        $contents = @file_get_contents($path);
+
+        if ($contents === false) {
+            return null;
+        }
+
+        $data = json_decode($contents, true);
+
+        if (
+            ! is_array($data)
+            || ! isset($data['total'], $data['idle'], $data['time'])
+            || ! is_int($data['total'])
+            || ! is_int($data['idle'])
+            || ! is_numeric($data['time'])
+        ) {
+            return null;
+        }
+
+        return [
+            'total' => $data['total'],
+            'idle' => $data['idle'],
+            'time' => (float) $data['time'],
+        ];
+    }
+
+    /**
+     * Persist the current CPU tick snapshot for the next report cycle.
+     *
+     * @param  array{total: int, idle: int}  $stat
+     */
+    private function writeCpuSnapshot(array $stat): void
+    {
+        $path = $this->cpuSnapshotPath();
+        $dir = dirname($path);
+
+        if (! is_dir($dir)) {
+            @mkdir($dir, 0755, true);
+        }
+
+        $tempPath = $path.'.tmp';
+        $payload = json_encode([
+            'total' => $stat['total'],
+            'idle' => $stat['idle'],
+            'time' => microtime(true),
+        ]);
+
+        if ($payload !== false && @file_put_contents($tempPath, $payload) !== false) {
+            @rename($tempPath, $path);
+        }
+    }
+
+    /**
+     * Location of the persisted CPU snapshot. Mirrors ConfigService's
+     * file-based cache convention (Laravel storage, temp fallback).
+     */
+    protected function cpuSnapshotPath(): string
+    {
+        if (function_exists('storage_path')) {
+            return storage_path('framework/cache/serverpulse/.cpu_snapshot');
+        }
+
+        return sys_get_temp_dir().DIRECTORY_SEPARATOR.'.cpu_snapshot';
+    }
+
+    /**
      * Collect CPU core count via fallback chain.
      *
-     * Priority (D-02): /proc/cpuinfo → nproc shell → 1
+     * Priority (D-02): /proc/cpuinfo → /sys CPU dirs → nproc shell → 1.
+     * The raw /proc/cpuinfo contents are matched line-by-line (not the
+     * key-collapsing parser) so each `processor : N` line counts once.
      */
     private function collectCpuCores(): int
     {
-        $cpuInfo = $this->safeParseProcFile('/proc/cpuinfo');
+        $cpuInfo = $this->safeFileGet('/proc/cpuinfo');
 
         if ($cpuInfo !== null) {
-            $count = 0;
-            foreach ($cpuInfo as $key => $value) {
-                if (str_starts_with($key, 'processor')) {
-                    $count++;
-                }
-            }
+            $count = preg_match_all('/^processor\s*:\s*\d+/m', $cpuInfo);
 
-            if ($count > 0) {
+            if ($count !== false && $count > 0) {
                 return $count;
             }
+        }
+
+        $cpuDirs = $this->sysCpuDirectories();
+
+        if ($cpuDirs !== []) {
+            return count($cpuDirs);
         }
 
         $nproc = $this->safeExec('nproc 2>/dev/null');
@@ -347,6 +518,20 @@ CMD;
         }
 
         return 1;
+    }
+
+    /**
+     * CPU device directories under /sys, used as a core-count fallback.
+     *
+     * Exposed so tests can stub it on any platform.
+     *
+     * @return string[]
+     */
+    protected function sysCpuDirectories(): array
+    {
+        $dirs = glob('/sys/devices/system/cpu/cpu[0-9]*');
+
+        return is_array($dirs) ? $dirs : [];
     }
 
     /**

@@ -63,6 +63,11 @@ function makeServerCollector(array $procFiles = [], array $files = [], array $sh
             return $this->shell[$command] ?? null;
         }
 
+        protected function sysCpuDirectories(): array
+        {
+            return [];
+        }
+
         protected function doCollect(array $config): array
         {
             // D-10 bypass only — the metric math is the production code path.
@@ -93,6 +98,98 @@ function makeWindowsServerCollector(?string $probeOutput = null): ServerCollecto
         {
             // D-10 bypass only — the metric math is the production code path.
             return $this->collectWindowsMetrics();
+        }
+    };
+}
+
+/**
+ * Create a CPU-focused collector that injects deterministic /proc/cpuinfo,
+ * /proc/stat and load-average fixtures, plus an isolated CPU snapshot file.
+ *
+ * Used to exercise collectCpuCores() and collectCpuPercent() without any
+ * platform dependency (no real sys_getloadavg / glob / shell).
+ */
+function makeCpuCollector(
+    string $cpuInfo,
+    string $statContents,
+    array|false|null $loadAverages,
+    ?array $snapshot,
+): ServerCollector {
+    return new class($cpuInfo, $statContents, $loadAverages, $snapshot) extends ServerCollector
+    {
+        private string $snapshotPath;
+
+        public function __construct(
+            private readonly string $cpuInfo,
+            private readonly string $statContents,
+            private readonly array|false|null $loadAverages,
+            private readonly ?array $snapshot,
+        ) {
+            $this->snapshotPath = sys_get_temp_dir().DIRECTORY_SEPARATOR.'sp_cpu_snap_'.uniqid();
+
+            if ($snapshot !== null) {
+                file_put_contents($this->snapshotPath, json_encode($snapshot));
+            }
+        }
+
+        protected function safeFileGet(string $path): ?string
+        {
+            if ($path === '/proc/cpuinfo') {
+                return $this->cpuInfo;
+            }
+
+            if ($path === '/proc/stat') {
+                return $this->statContents;
+            }
+
+            return null;
+        }
+
+        protected function safeExec(string $command): ?string
+        {
+            return null;
+        }
+
+        protected function loadAverages(): array|false
+        {
+            if ($this->loadAverages === null) {
+                return parent::loadAverages();
+            }
+
+            return $this->loadAverages;
+        }
+
+        protected function sysCpuDirectories(): array
+        {
+            return [];
+        }
+
+        protected function cpuSnapshotPath(): string
+        {
+            return $this->snapshotPath;
+        }
+
+        protected function doCollect(array $config): array
+        {
+            return $this->collectMetrics();
+        }
+
+        public function snapshotContents(): ?array
+        {
+            if (! is_file($this->snapshotPath)) {
+                return null;
+            }
+
+            $decoded = json_decode((string) file_get_contents($this->snapshotPath), true);
+
+            return is_array($decoded) ? $decoded : null;
+        }
+
+        public function cleanupSnapshot(): void
+        {
+            if (is_file($this->snapshotPath)) {
+                unlink($this->snapshotPath);
+            }
         }
     };
 }
@@ -131,29 +228,103 @@ it('returns nulls for /proc sources when no data is available', function () {
     expect($result['disk_percent'])->toBeFloat();
 });
 
-it('returns cpu data from /proc/cpuinfo and sys_getloadavg', function () {
-    if (! function_exists('sys_getloadavg')) {
-        $this->markTestSkipped('sys_getloadavg() not available on this platform');
-    }
+it('counts CPU cores from raw /proc/cpuinfo processor lines', function () {
+    $cpuInfo = "processor\t: 0\nvendor_id\t: GenuineIntel\nprocessor\t: 1\nprocessor\t: 2\nprocessor\t: 3\n";
 
-    $cpuInfo = [
-        'processor' => '0',
-        'vendor_id' => 'GenuineIntel',
-        'processor' => '1',
-        'processor' => '2',
-        'processor' => '3',
-    ];
-
-    $collector = makeServerCollector(['/proc/cpuinfo' => $cpuInfo]);
-
-    $load = sys_getloadavg();
+    $collector = makeCpuCollector($cpuInfo, '', false, null);
     $result = $collector->collect([]);
 
     expect($result['cpu_cores'])->toBe(4);
-    expect($result['load_avg_1m'])->toBe($load[0]);
-    expect($result['load_avg_5m'])->toBe($load[1]);
-    expect($result['load_avg_15m'])->toBe($load[2]);
-    expect($result['cpu_percent'])->toBeFloat();
+});
+
+it('computes cpu_percent from /proc/stat deltas', function () {
+    // Baseline snapshot: total 1000 ticks, 800 idle (i.e. 20% busy at that point).
+    $snapshot = ['total' => 1000, 'idle' => 800, 'time' => microtime(true) - 60];
+
+    // Next sample: user 150, nice 30, system 40, idle 800, iowait 10.
+    // total = 1030, idle (idle+iowait) = 810.
+    // Delta: total +30, idle +10 → busy 20 → 66.7%.
+    $stat = "cpu  150 30 40 800 10 0 0 0 0 0\ncpu0 50 10 10 300 5 0 0 0 0 0\n";
+
+    $collector = makeCpuCollector('', $stat, false, $snapshot);
+
+    try {
+        $result = $collector->collect([]);
+
+        expect($result['cpu_percent'])->toBe(66.7);
+
+        // The new snapshot is persisted for the next cycle.
+        $next = $collector->snapshotContents();
+        expect($next)->not->toBeNull();
+        expect($next['total'])->toBe(1030);
+        expect($next['idle'])->toBe(810);
+    } finally {
+        $collector->cleanupSnapshot();
+    }
+});
+
+it('caps cpu_percent at 100 from /proc/stat deltas', function () {
+    // Baseline: total 1000 ticks, fully busy (idle 0).
+    $snapshot = ['total' => 1000, 'idle' => 0, 'time' => microtime(true) - 60];
+
+    // Next sample: 90 more busy ticks, still zero idle → 100% busy.
+    $stat = "cpu  1000 0 90 0 0 0 0 0 0 0\n";
+
+    $collector = makeCpuCollector('', $stat, false, $snapshot);
+
+    try {
+        $result = $collector->collect([]);
+
+        expect($result['cpu_percent'])->toBe(100.0);
+    } finally {
+        $collector->cleanupSnapshot();
+    }
+});
+
+it('falls back to load estimate capped at 100 on first run', function () {
+    // No snapshot yet (first run) → load/cores estimate, never >100.
+    $cpuInfo = "processor\t: 0\n";
+
+    $collector = makeCpuCollector($cpuInfo, 'cpu  0 0 0 0 0 0 0 0 0 0', [5.0, 5.0, 5.0], null);
+
+    try {
+        $result = $collector->collect([]);
+
+        expect($result['cpu_cores'])->toBe(1);
+        expect($result['cpu_percent'])->toBe(100.0);
+    } finally {
+        $collector->cleanupSnapshot();
+    }
+});
+
+it('returns null cpu_percent when load source is unavailable on first run', function () {
+    $collector = makeCpuCollector('', 'cpu  0 0 0 0 0 0 0 0 0 0', false, null);
+
+    try {
+        $result = $collector->collect([]);
+
+        expect($result['cpu_percent'])->toBeNull();
+    } finally {
+        $collector->cleanupSnapshot();
+    }
+});
+
+it('returns 4 cores and load averages from injected sources', function () {
+    $cpuInfo = "processor\t: 0\nprocessor\t: 1\nprocessor\t: 2\nprocessor\t: 3\n";
+
+    $collector = makeCpuCollector($cpuInfo, '', [1.62, 1.64, 1.75], null);
+
+    try {
+        $result = $collector->collect([]);
+
+        expect($result['cpu_cores'])->toBe(4);
+        expect($result['load_avg_1m'])->toBe(1.62);
+        expect($result['load_avg_5m'])->toBe(1.64);
+        expect($result['load_avg_15m'])->toBe(1.75);
+        expect($result['cpu_percent'])->toBe(40.5);
+    } finally {
+        $collector->cleanupSnapshot();
+    }
 });
 
 it('returns ram data from /proc/meminfo using exact-kb math', function () {
@@ -197,7 +368,7 @@ it('returns uptime from /proc/uptime as integer seconds', function () {
 });
 
 it('handles partial metric failure independently', function () {
-    $collector = makeServerCollector(['/proc/cpuinfo' => ['processor' => '0']]);
+    $collector = makeServerCollector([], ['/proc/cpuinfo' => "processor\t: 0\n"]);
 
     $result = $collector->collect([]);
 
