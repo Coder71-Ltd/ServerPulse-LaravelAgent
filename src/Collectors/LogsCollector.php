@@ -19,6 +19,12 @@ class LogsCollector extends BaseCollector
      */
     private const MAX_ENTRIES = 100;
 
+    /**
+     * Maximum number of *.log files to process when a configured
+     * log_path points at a directory.
+     */
+    private const MAX_FILES = 10;
+
     public function key(): string
     {
         return 'logs';
@@ -32,9 +38,11 @@ class LogsCollector extends BaseCollector
      * LOG-03: Parses Monolog ERROR/WARNING/CRITICAL/ALERT/EMERGENCY lines.
      * LOG-04: Returns structured entries per file with capped results.
      * LOG-05: Missing/unreadable files return zero count — never crash.
+     * LOG-06: Directory paths are expanded to their *.log files (newest first,
+     *         capped at MAX_FILES) so directory log_paths yield real entries.
      *
      * @param  array<string, mixed>  $config
-     * @return array<int, array{path: string, count: int, entries: array}>
+     * @return array<int, array{path: string, count: int, entries: array<int, array{datetime: string, message: string, level: string}>}>
      */
     protected function doCollect(array $config): array
     {
@@ -45,7 +53,14 @@ class LogsCollector extends BaseCollector
         }
 
         $results = [];
+
         foreach ($logPaths as $path) {
+            if (is_dir($path)) {
+                $results = array_merge($results, $this->collectFromDirectory($path));
+
+                continue;
+            }
+
             if (! is_readable($path)) {
                 $results[] = [
                     'path' => $path,
@@ -57,6 +72,50 @@ class LogsCollector extends BaseCollector
             }
 
             $results[] = $this->processLogFile($path);
+        }
+
+        return $results;
+    }
+
+    /**
+     * Expand a directory path into its *.log files (newest first) and
+     * process each one. Returns a single zero-count result when the
+     * directory contains no log files.
+     *
+     * @return array<int, array{path: string, count: int, entries: array<int, array{datetime: string, message: string, level: string}>}>
+     */
+    private function collectFromDirectory(string $dir): array
+    {
+        $pattern = rtrim(str_replace('\\', '/', $dir), '/').'/*.log';
+        $files = glob($pattern);
+
+        if (! is_array($files) || $files === []) {
+            return [
+                [
+                    'path' => $dir,
+                    'count' => 0,
+                    'entries' => [],
+                ],
+            ];
+        }
+
+        rsort($files);
+        $files = array_slice($files, 0, self::MAX_FILES);
+
+        $results = [];
+
+        foreach ($files as $file) {
+            if (! is_readable($file)) {
+                $results[] = [
+                    'path' => $file,
+                    'count' => 0,
+                    'entries' => [],
+                ];
+
+                continue;
+            }
+
+            $results[] = $this->processLogFile($file);
         }
 
         return $results;
@@ -98,6 +157,7 @@ class LogsCollector extends BaseCollector
      *   - string[]: ["/var/log/laravel.log"]
      *   - object[]: [{"label": "app", "path": "/var/log/app.log"}]
      *
+     * @param  array<int, mixed>  $paths
      * @return string[]
      */
     private function normalizeLogPaths(array $paths): array
@@ -122,7 +182,7 @@ class LogsCollector extends BaseCollector
      * Parses Monolog entries matching 5 error levels, capped at MAX_ENTRIES.
      *
      * @param  string  $path  Absolute path to the log file
-     * @return array{path: string, count: int, entries: array}
+     * @return array{path: string, count: int, entries: array<int, array{datetime: string, message: string, level: string}>}
      */
     private function processLogFile(string $path): array
     {
@@ -209,7 +269,7 @@ class LogsCollector extends BaseCollector
      * Parse log output and extract structured Monolog entries.
      *
      * @param  string  $output  Raw log lines
-     * @return array{path: string, count: int, entries: array}
+     * @return array{path: string, count: int, entries: array<int, array{datetime: string, message: string, level: string}>}
      */
     private function parseLogOutput(string $path, string $output): array
     {

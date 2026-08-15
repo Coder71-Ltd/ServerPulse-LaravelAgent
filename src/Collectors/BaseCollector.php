@@ -11,7 +11,7 @@ abstract class BaseCollector implements CollectorInterface
      * Catches all exceptions — never bubbles up to the host app.
      *
      * @param  array<string, mixed>  $config
-     * @return array<string, mixed>
+     * @return array<string|int, mixed>
      */
     final public function collect(array $config): array
     {
@@ -26,7 +26,7 @@ abstract class BaseCollector implements CollectorInterface
      * Subclass hook: implement the actual collection logic.
      *
      * @param  array<string, mixed>  $config
-     * @return array<string, mixed>
+     * @return array<string|int, mixed>
      */
     abstract protected function doCollect(array $config): array;
 }

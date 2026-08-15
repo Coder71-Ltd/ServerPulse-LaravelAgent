@@ -399,3 +399,119 @@ it('returns zero count when both shell and PHP read fail', function () {
     expect($result[0]['count'])->toBe(0);
     expect($result[0]['entries'])->toBe([]);
 });
+
+it('expands directory log_path into its *.log files', function () {
+    $dir = sys_get_temp_dir().DIRECTORY_SEPARATOR.'sp_logdir_'.uniqid();
+    mkdir($dir);
+
+    $fileA = $dir.DIRECTORY_SEPARATOR.'laravel-2026-08-01.log';
+    $fileB = $dir.DIRECTORY_SEPARATOR.'laravel-2026-07-30.log';
+    file_put_contents($fileA, "[2026-08-01 10:00:00] production.ERROR: Latest error\n");
+    file_put_contents($fileB, "[2026-07-30 10:00:00] production.WARNING: Older warning\n");
+
+    $collector = new class extends LogsCollector
+    {
+        protected function safeExec(string $command): ?string
+        {
+            if (preg_match('/tail -n 1000 (.+) 2>\\/dev\\/null/', $command, $m)) {
+                $maybePath = trim($m[1], " \"'");
+                if (file_exists($maybePath)) {
+                    return file_get_contents($maybePath);
+                }
+            }
+
+            return null;
+        }
+    };
+
+    try {
+        $result = $collector->collect([
+            'log_paths' => [$dir],
+        ]);
+    } finally {
+        unlink($fileA);
+        unlink($fileB);
+        rmdir($dir);
+    }
+
+    expect($result)->toHaveCount(2);
+    expect($result[0]['path'])->toBe(str_replace('\\', '/', $fileA));
+    expect($result[0]['count'])->toBe(1);
+    expect($result[0]['entries'][0]['message'])->toBe('Latest error');
+    expect($result[1]['path'])->toBe(str_replace('\\', '/', $fileB));
+    expect($result[1]['count'])->toBe(1);
+    expect($result[1]['entries'][0]['message'])->toBe('Older warning');
+});
+
+it('returns single zero-count result for a directory without log files', function () {
+    $dir = sys_get_temp_dir().DIRECTORY_SEPARATOR.'sp_logdir_'.uniqid();
+    mkdir($dir);
+
+    $collector = new class extends LogsCollector
+    {
+        protected function safeExec(string $command): ?string
+        {
+            return null;
+        }
+    };
+
+    try {
+        $result = $collector->collect([
+            'log_paths' => [$dir],
+        ]);
+    } finally {
+        rmdir($dir);
+    }
+
+    expect($result)->toHaveCount(1);
+    expect($result[0]['path'])->toBe($dir);
+    expect($result[0]['count'])->toBe(0);
+    expect($result[0]['entries'])->toBe([]);
+});
+
+it('caps directory scan at 10 newest log files', function () {
+    $dir = sys_get_temp_dir().DIRECTORY_SEPARATOR.'sp_logdir_'.uniqid();
+    mkdir($dir);
+
+    $paths = [];
+
+    for ($i = 1; $i <= 12; $i++) {
+        $day = str_pad((string) $i, 2, '0', STR_PAD_LEFT);
+        $file = $dir.DIRECTORY_SEPARATOR.'laravel-2026-08-'.$day.'.log';
+        file_put_contents($file, "[2026-08-{$day} 10:00:00] production.ERROR: Error {$i}\n");
+        $paths[] = $file;
+    }
+
+    $collector = new class extends LogsCollector
+    {
+        protected function safeExec(string $command): ?string
+        {
+            if (preg_match('/tail -n 1000 (.+) 2>\\/dev\\/null/', $command, $m)) {
+                $maybePath = trim($m[1], " \"'");
+                if (file_exists($maybePath)) {
+                    return file_get_contents($maybePath);
+                }
+            }
+
+            return null;
+        }
+    };
+
+    try {
+        $result = $collector->collect([
+            'log_paths' => [$dir],
+        ]);
+    } finally {
+        foreach ($paths as $file) {
+            unlink($file);
+        }
+        rmdir($dir);
+    }
+
+    expect($result)->toHaveCount(10);
+
+    foreach ($result as $fileResult) {
+        expect($fileResult['count'])->toBe(1);
+        expect($fileResult['entries'][0]['level'])->toBe('ERROR');
+    }
+});
