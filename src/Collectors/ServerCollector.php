@@ -24,12 +24,24 @@ class ServerCollector extends BaseCollector
      */
     protected function doCollect(array $config): array
     {
-        try {
-            // D-10: Non-Linux early exit — no /proc filesystem available
-            if (PHP_OS_FAMILY !== 'Linux') {
-                return $this->nullResult();
-            }
+        // D-10: Non-Linux early exit — no /proc filesystem available
+        if (PHP_OS_FAMILY !== 'Linux') {
+            return $this->nullResult();
+        }
 
+        return $this->collectMetrics();
+    }
+
+    /**
+     * The actual metric collection logic, kept free of platform guards so
+     * tests (and any platform with the required sources) can exercise the
+     * real math instead of a copy.
+     *
+     * @return array<string, mixed>
+     */
+    protected function collectMetrics(): array
+    {
+        try {
             // CPU metrics (SRV-01, SRV-02, SRV-03)
             $load = $this->collectLoadAverages();
             $cores = $this->collectCpuCores();
@@ -70,11 +82,13 @@ class ServerCollector extends BaseCollector
     /**
      * Collect CPU load averages via sys_getloadavg().
      *
+     * Raw values are returned (spec §8.1) — no rounding applied.
+     *
      * @return array{load_avg_1m: float|null, load_avg_5m: float|null, load_avg_15m: float|null}
      */
     private function collectLoadAverages(): array
     {
-        $load = sys_getloadavg();
+        $load = function_exists('sys_getloadavg') ? sys_getloadavg() : false;
 
         if ($load === false) {
             return [
@@ -85,9 +99,9 @@ class ServerCollector extends BaseCollector
         }
 
         return [
-            'load_avg_1m' => round($load[0], 2),
-            'load_avg_5m' => round($load[1], 2),
-            'load_avg_15m' => round($load[2], 2),
+            'load_avg_1m' => $load[0],
+            'load_avg_5m' => $load[1],
+            'load_avg_15m' => $load[2],
         ];
     }
 
@@ -127,6 +141,9 @@ class ServerCollector extends BaseCollector
      *
      * Priority (D-05): /proc/meminfo → free -m shell → null
      *
+     * Used/total are computed from exact KB values before rounding so
+     * `ram_used_mb` and `ram_percent` stay consistent with each other.
+     *
      * @return array{ram_total_mb: float|null, ram_used_mb: float|null, ram_percent: float|null}
      */
     private function collectRamMetrics(): array
@@ -138,15 +155,12 @@ class ServerCollector extends BaseCollector
             $availKb = isset($memInfo['MemAvailable']) ? (int) $memInfo['MemAvailable'] : 0;
 
             if ($totalKb > 0) {
-                $totalMb = round($totalKb / 1024, 1);
-                $availMb = round($availKb / 1024, 1);
-                $usedMb = round($totalMb - $availMb, 1);
-                $percent = round((($totalKb - $availKb) / $totalKb) * 100, 1);
+                $usedKb = $totalKb - $availKb;
 
                 return [
-                    'ram_total_mb' => $totalMb,
-                    'ram_used_mb' => $usedMb,
-                    'ram_percent' => $percent,
+                    'ram_total_mb' => round($totalKb / 1024, 1),
+                    'ram_used_mb' => round($usedKb / 1024, 1),
+                    'ram_percent' => round(($usedKb / $totalKb) * 100, 1),
                 ];
             }
         }
@@ -207,6 +221,9 @@ class ServerCollector extends BaseCollector
     /**
      * Collect disk metrics for root / only.
      *
+     * Used/total are computed from exact byte values before rounding so
+     * `disk_used_gb` and `disk_percent` stay consistent with each other.
+     *
      * @return array{disk_total_gb: float|null, disk_used_gb: float|null, disk_percent: float|null}
      */
     private function collectDiskMetrics(): array
@@ -224,22 +241,35 @@ class ServerCollector extends BaseCollector
 
         $safeFreeBytes = $freeBytes !== false ? $freeBytes : 0;
 
-        $totalGb = round($totalBytes / 1073741824, 1);
-        $freeGb = round($safeFreeBytes / 1073741824, 1);
-        $usedGb = round($totalGb - $freeGb, 1);
-        $percent = round((($totalBytes - $safeFreeBytes) / $totalBytes) * 100, 1);
+        return $this->computeDiskFromBytes($totalBytes, $safeFreeBytes);
+    }
+
+    /**
+     * Derive disk metrics from exact byte values.
+     *
+     * Extracted so the math is unit-testable without a real filesystem.
+     * Used/total are computed from exact bytes before rounding so
+     * `disk_used_gb` and `disk_percent` stay consistent with each other.
+     *
+     * @return array{disk_total_gb: float, disk_used_gb: float, disk_percent: float}
+     */
+    protected function computeDiskFromBytes(float $totalBytes, float $freeBytes): array
+    {
+        $usedBytes = $totalBytes - $freeBytes;
 
         return [
-            'disk_total_gb' => $totalGb,
-            'disk_used_gb' => $usedGb,
-            'disk_percent' => $percent,
+            'disk_total_gb' => round($totalBytes / 1073741824, 1),
+            'disk_used_gb' => round($usedBytes / 1073741824, 1),
+            'disk_percent' => round(($usedBytes / $totalBytes) * 100, 1),
         ];
     }
 
     /**
      * Collect system uptime in seconds.
+     *
+     * Reported as an integer (spec §8.1 / §9 payload example).
      */
-    private function collectUptime(): ?float
+    private function collectUptime(): ?int
     {
         $contents = $this->safeFileGet('/proc/uptime');
 
@@ -255,7 +285,7 @@ class ServerCollector extends BaseCollector
 
         $parts = explode(' ', $trimmed);
 
-        return (float) $parts[0];
+        return (int) $parts[0];
     }
 
     /**
