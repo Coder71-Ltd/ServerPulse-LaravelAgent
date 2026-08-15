@@ -13,7 +13,7 @@ return [
     |
     */
 
-    'api_base' => env('SERVERPULSE_API_BASE', 'https://api.serverpulse.io'),
+    'api_base' => env('SERVERPULSE_API_BASE', 'https://serverpulse.coder71.com'),
 
     'api_key' => env('SERVERPULSE_API_KEY'),
 
