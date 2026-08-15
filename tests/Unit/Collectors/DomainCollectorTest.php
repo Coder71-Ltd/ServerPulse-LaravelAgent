@@ -82,3 +82,13 @@ it('returns null for ssl_expiry on http url', function () {
 
     expect($result['ssl_expiry'])->toBeNull();
 });
+
+it('reports the project root directory via base_path', function () {
+    $collector = new DomainCollector;
+    $result = $collector->collect([]);
+
+    expect($result)->toHaveKey('root_directory');
+    expect($result['root_directory'])->toBe(base_path());
+    expect($result['root_directory'])->not->toBeEmpty();
+    expect(is_dir($result['root_directory']))->toBeTrue();
+});

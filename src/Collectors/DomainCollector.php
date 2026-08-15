@@ -22,6 +22,7 @@ class DomainCollector extends BaseCollector
             'hostname' => $this->resolveHostname(),
             'server_ip' => $this->resolveServerIp(),
             'ssl_expiry' => $this->resolveSslExpiry($appUrl),
+            'root_directory' => $this->resolveRootDirectory(),
         ];
     }
 
@@ -53,6 +54,17 @@ class DomainCollector extends BaseCollector
         $hostname = gethostname();
 
         return $hostname !== false ? $hostname : null;
+    }
+
+    private function resolveRootDirectory(): ?string
+    {
+        if (! function_exists('base_path')) {
+            return null;
+        }
+
+        $path = base_path();
+
+        return is_string($path) && $path !== '' ? $path : null;
     }
 
     private function resolveServerIp(): ?string
