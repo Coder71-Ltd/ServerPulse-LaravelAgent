@@ -268,24 +268,21 @@ class LogsCollector extends BaseCollector
     /**
      * Parse log output and extract structured Monolog entries.
      *
-     * Only entries matching the reporting date (today) are kept; older
-     * entries are dropped so the payload reflects the current day only.
+     * Entries matching the reporting date (today) are preferred. When
+     * there are none, entries from the most recent available date are
+     * used instead, so the payload is never empty just because no log
+     * was written today.
      *
      * @param  string  $output  Raw log lines
      * @return array{path: string, count: int, entries: array<int, array{datetime: string, message: string, level: string}>}
      */
     private function parseLogOutput(string $path, string $output): array
     {
-        $reportingDate = $this->reportingDate();
         $lines = explode("\n", $output);
         $entries = [];
 
         foreach ($lines as $line) {
             if (preg_match(self::MONOLOG_REGEX, $line, $matches)) {
-                if (substr($matches[1], 0, 10) !== $reportingDate) {
-                    continue;
-                }
-
                 $entries[] = [
                     'datetime' => $matches[1],
                     'message' => trim($matches[4]),
@@ -293,6 +290,8 @@ class LogsCollector extends BaseCollector
                 ];
             }
         }
+
+        $entries = $this->selectReportingEntries($entries);
 
         $count = count($entries);
         $capped = array_slice($entries, 0, self::MAX_ENTRIES);
@@ -302,6 +301,35 @@ class LogsCollector extends BaseCollector
             'count' => $count,
             'entries' => $capped,
         ];
+    }
+
+    /**
+     * Keep entries for the reporting date; fall back to the most recent
+     * available date when the reporting date has none.
+     *
+     * @param  array<int, array{datetime: string, message: string, level: string}>  $entries
+     * @return array<int, array{datetime: string, message: string, level: string}>
+     */
+    private function selectReportingEntries(array $entries): array
+    {
+        if ($entries === []) {
+            return [];
+        }
+
+        $reportingDate = $this->reportingDate();
+        $byDate = [];
+
+        foreach ($entries as $entry) {
+            $byDate[substr($entry['datetime'], 0, 10)][] = $entry;
+        }
+
+        if (isset($byDate[$reportingDate])) {
+            return $byDate[$reportingDate];
+        }
+
+        krsort($byDate);
+
+        return reset($byDate);
     }
 
     /**

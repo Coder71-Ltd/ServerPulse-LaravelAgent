@@ -448,8 +448,8 @@ it('expands directory log_path into its *.log files', function () {
     expect($result[0]['count'])->toBe(1);
     expect($result[0]['entries'][0]['message'])->toBe('Latest error');
     expect($result[1]['path'])->toBe(str_replace('\\', '/', $fileB));
-    expect($result[1]['count'])->toBe(0);
-    expect($result[1]['entries'])->toBe([]);
+    expect($result[1]['count'])->toBe(1);
+    expect($result[1]['entries'][0]['message'])->toBe('Older warning');
 });
 
 it('returns single zero-count result for a directory without log files', function () {
@@ -564,4 +564,44 @@ it('only keeps entries from the reporting date', function () {
     expect($messages)->toContain('Today warning');
     expect($messages)->not->toContain('Old critical');
     expect($messages)->not->toContain('Old error');
+});
+
+it('falls back to the most recent date when the reporting date has no entries', function () {
+    $lines = implode("\n", [
+        '[2026-06-10 10:15:30] production.ERROR: June error',
+        '[2026-08-01 10:15:31] production.CRITICAL: Newest critical',
+        '[2026-08-01 10:15:32] production.WARNING: Newest warning',
+        '[2026-07-20 10:15:33] production.ERROR: July error',
+    ]);
+
+    $tempFile = createTempLog($lines);
+
+    $collector = new class extends LogsCollector
+    {
+        protected function safeExec(string $command): ?string
+        {
+            if (preg_match('/tail -n 1000 (.+) 2>\\/dev\\/null/', $command, $m)) {
+                $maybePath = trim($m[1], " \"'");
+                if (file_exists($maybePath)) {
+                    return file_get_contents($maybePath);
+                }
+            }
+
+            return null;
+        }
+    };
+
+    $result = $collector->collect([
+        'log_paths' => [$tempFile],
+    ]);
+
+    unlink($tempFile);
+
+    expect($result)->toHaveCount(1);
+    expect($result[0]['count'])->toBe(2);
+
+    $entries = $result[0]['entries'];
+    expect($entries[0]['datetime'])->toStartWith('2026-08-01');
+    expect($entries[0]['level'])->toBe('CRITICAL');
+    expect($entries[1]['level'])->toBe('WARNING');
 });
