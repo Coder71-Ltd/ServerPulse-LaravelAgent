@@ -12,6 +12,7 @@ beforeEach(function () {
     config([
         'services.serverpulse.api_base' => 'https://test.example.com',
         'services.serverpulse.api_key' => 'test_key_123',
+        'app.url' => null,
     ]);
     $_SERVER['HTTP_HOST'] = 'myapp.example.com';
 });
@@ -35,6 +36,45 @@ it('sends payload and returns success on 202', function () {
             && ($request->header('X-Agent-Domain')[0] ?? '') === 'myapp.example.com'
             && ($request->header('X-API-Key')[0] ?? '') === 'test_key_123'
             && $request['test'] === 'data';
+    });
+});
+
+it('sends cached agent config api key when available', function () {
+    $cachePath = tempCachePath();
+    file_put_contents($cachePath, json_encode(['enabled' => true, 'api_key' => 'cached_key_abc']));
+
+    Http::fake([
+        'test.example.com/*' => Http::response(['status' => 'accepted'], 202),
+    ]);
+
+    $config = new ConfigService($cachePath);
+    $service = new ReportService;
+    $result = $service->send([], $config);
+
+    expect($result['success'])->toBeTrue();
+
+    Http::assertSent(function ($request) {
+        return ($request->header('X-API-Key')[0] ?? '') === 'cached_key_abc';
+    });
+
+    unlink($cachePath);
+});
+
+it('sends no api key header when none is configured', function () {
+    Http::fake([
+        'test.example.com/*' => Http::response(['status' => 'accepted'], 202),
+    ]);
+
+    config(['services.serverpulse.api_key' => null]);
+
+    $config = new ConfigService(tempCachePath());
+    $service = new ReportService;
+    $result = $service->send([], $config);
+
+    expect($result['success'])->toBeTrue();
+
+    Http::assertSent(function ($request) {
+        return ! $request->hasHeader('X-API-Key');
     });
 });
 

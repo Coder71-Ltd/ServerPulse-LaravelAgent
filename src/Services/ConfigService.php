@@ -58,11 +58,18 @@ class ConfigService
         }
 
         try {
-            $response = Http::withHeaders([
+            $headers = [
                 'X-Agent-Version' => '1.0',
                 'X-Agent-Domain' => $this->resolveAgentDomain(),
-                'X-API-Key' => config('services.serverpulse.api_key'),
-            ])->get($this->resolveApiBase().'/v1/agent/config');
+            ];
+
+            $apiKey = $this->resolveApiKey();
+
+            if ($apiKey !== null) {
+                $headers['X-API-Key'] = $apiKey;
+            }
+
+            $response = Http::withHeaders($headers)->get($this->resolveApiBase().'/v1/agent/config');
 
             if ($response->status() === 200) {
                 $config = $response->json();
@@ -111,6 +118,12 @@ class ConfigService
 
     public function resolveAgentDomain(): string
     {
+        $appUrlHost = $this->resolveAppUrlHost();
+
+        if ($appUrlHost !== null) {
+            return $appUrlHost;
+        }
+
         if (! empty($_SERVER['HTTP_HOST'])) {
             return $_SERVER['HTTP_HOST'];
         }
@@ -122,6 +135,50 @@ class ConfigService
         }
 
         return 'unknown';
+    }
+
+    /**
+     * Resolve the API key for outbound requests.
+     *
+     * The key is strictly optional — identity is the reported domain/URL/IP,
+     * not the key. Priority: cached agent config `api_key` → env-derived
+     * config value → null (no header sent).
+     */
+    public function resolveApiKey(): ?string
+    {
+        $cached = $this->readStaleCache();
+
+        if (is_array($cached) && isset($cached['api_key']) && is_string($cached['api_key']) && $cached['api_key'] !== '') {
+            return $cached['api_key'];
+        }
+
+        $configured = config('services.serverpulse.api_key');
+
+        if (is_string($configured) && $configured !== '') {
+            return $configured;
+        }
+
+        return null;
+    }
+
+    /**
+     * Derive the primary identifier host from the host app's configured URL.
+     */
+    private function resolveAppUrlHost(): ?string
+    {
+        $appUrl = config('app.url');
+
+        if (! is_string($appUrl) || $appUrl === '') {
+            return null;
+        }
+
+        $host = parse_url($appUrl, PHP_URL_HOST);
+
+        if (! is_string($host) || $host === '') {
+            return null;
+        }
+
+        return $host;
     }
 
     /**

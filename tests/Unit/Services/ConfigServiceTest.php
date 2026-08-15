@@ -155,3 +155,73 @@ it('marks the agent as disabled', function () {
     $result = $service->get();
     expect($result['enabled'])->toBeFalse();
 });
+
+it('resolves api key from cached agent config first', function () {
+    writeTestCache(['enabled' => true, 'api_key' => 'cached_key_abc'], mtimeAgo: 100);
+
+    $service = new ConfigService(tempCachePath());
+
+    expect($service->resolveApiKey())->toBe('cached_key_abc');
+});
+
+it('falls back to configured api key when cache has none', function () {
+    writeTestCache(['enabled' => true], mtimeAgo: 100);
+
+    $service = new ConfigService(tempCachePath());
+
+    expect($service->resolveApiKey())->toBe('test_key_123');
+});
+
+it('returns null api key when neither cache nor config provide one', function () {
+    writeTestCache(['enabled' => true], mtimeAgo: 100);
+
+    config(['services.serverpulse.api_key' => null]);
+
+    $service = new ConfigService(tempCachePath());
+
+    expect($service->resolveApiKey())->toBeNull();
+});
+
+it('prefers stale cache api key even when cache is expired', function () {
+    writeTestCache(['enabled' => true, 'api_key' => 'stale_key_xyz'], mtimeAgo: 3600);
+
+    $service = new ConfigService(tempCachePath());
+
+    expect($service->resolveApiKey())->toBe('stale_key_xyz');
+});
+
+it('resolves agent domain from app.url host first', function () {
+    config(['app.url' => 'https://client-site.com']);
+    $_SERVER['HTTP_HOST'] = 'example.com';
+
+    $service = new ConfigService(tempCachePath());
+
+    expect($service->resolveAgentDomain())->toBe('client-site.com');
+
+    unset($_SERVER['HTTP_HOST']);
+});
+
+it('falls back to HTTP_HOST when app.url has no host', function () {
+    config(['app.url' => null]);
+    $_SERVER['HTTP_HOST'] = 'example.com';
+
+    $service = new ConfigService(tempCachePath());
+
+    expect($service->resolveAgentDomain())->toBe('example.com');
+
+    unset($_SERVER['HTTP_HOST']);
+});
+
+it('sends api key header on config fetch when available', function () {
+    Http::fake([
+        'test.example.com/*' => Http::response(['enabled' => true], 200),
+    ]);
+
+    $service = new ConfigService(tempCachePath());
+    $service->get();
+
+    Http::assertSent(function (Request $request) {
+        return $request->url() === 'https://test.example.com/v1/agent/config'
+            && $request->header('X-API-Key')[0] === 'test_key_123';
+    });
+});
