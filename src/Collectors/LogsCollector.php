@@ -2,28 +2,82 @@
 
 namespace ServerPulse\Agent\Collectors;
 
-use ServerPulse\Agent\Support\ExecutesShellCommands;
+use ServerPulse\Agent\Contracts\CommitsAfterReport;
+use ServerPulse\Agent\Contracts\ProvidesExtraPayload;
+use ServerPulse\Agent\Support\LogChannelResolver;
+use ServerPulse\Agent\Support\LogCursorStore;
 
-class LogsCollector extends BaseCollector
+class LogsCollector extends BaseCollector implements CommitsAfterReport, ProvidesExtraPayload
 {
-    use ExecutesShellCommands;
+    /**
+     * Monolog line header: [datetime] environment.LEVEL: message
+     */
+    private const MONOLOG_REGEX = '/^\[(\d{4}-\d{2}-\d{2}[ T][0-9:.]+(?:[+-]\d{2}:?\d{2}|Z)?)\]\s+([\w.-]+)\.([A-Z]+):\s?(.*)$/';
 
     /**
-     * Monolog regex matching ERROR, WARNING, CRITICAL, ALERT, EMERGENCY levels.
-     * Captures datetime, channel, level, and message.
+     * Monolog severity ordering.
      */
-    private const MONOLOG_REGEX = '/\[(\d{4}-\d{2}-\d{2}[ \d:]+)\] (\w+)\.(ERROR|WARNING|CRITICAL|ALERT|EMERGENCY): (.*)/';
+    private const LEVELS = [
+        'DEBUG' => 0,
+        'INFO' => 1,
+        'NOTICE' => 2,
+        'WARNING' => 3,
+        'ERROR' => 4,
+        'CRITICAL' => 5,
+        'ALERT' => 6,
+        'EMERGENCY' => 7,
+    ];
+
+    private const DEFAULT_MIN_LEVEL = 'INFO';
 
     /**
-     * Maximum number of log entries to return per file.
+     * On a first run only ship the recent tail, never the whole file.
      */
-    private const MAX_ENTRIES = 100;
+    private const FIRST_RUN_BYTES = 32768;
 
     /**
-     * Maximum number of *.log files to process when a configured
-     * log_path points at a directory.
+     * Upper bound on bytes read for one channel in one report.
      */
+    private const MAX_BYTES_PER_RUN = 262144;
+
+    /**
+     * Upper bound on entries shipped for one channel in one report.
+     */
+    private const MAX_ENTRIES_PER_RUN = 500;
+
+    /**
+     * If a channel is further behind than this, jump to the recent tail
+     * instead of spending forever catching up.
+     */
+    private const MAX_BACKLOG_BYTES = 20971520;
+
+    private const BACKLOG_TAIL_BYTES = 262144;
+
+    private const MAX_ENTRY_BYTES = 8192;
+
     private const MAX_FILES = 10;
+
+    private ?LogChannelResolver $resolver;
+
+    private ?LogCursorStore $cursorStore;
+
+    /**
+     * @var array<string, array<string, mixed>>|null
+     */
+    private ?array $pendingState = null;
+
+    /**
+     * @var array<int, array<string, mixed>>
+     */
+    private array $discovery = [];
+
+    public function __construct(
+        ?LogChannelResolver $resolver = null,
+        ?LogCursorStore $cursorStore = null,
+    ) {
+        $this->resolver = $resolver;
+        $this->cursorStore = $cursorStore;
+    }
 
     public function key(): string
     {
@@ -31,100 +85,750 @@ class LogsCollector extends BaseCollector
     }
 
     /**
-     * Collect error/warning log entries from configured log files.
+     * Persist the read offsets only after the report was accepted.
+     */
+    public function commit(): void
+    {
+        if ($this->pendingState === null) {
+            return;
+        }
+
+        try {
+            $this->store()->save($this->pendingState);
+        } catch (\Throwable $e) {
+            return;
+        }
+
+        $this->pendingState = null;
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    public function extraPayload(): array
+    {
+        return ['log_channels' => $this->discovery];
+    }
+
+    /**
+     * Read new lines from every configured channel or log path.
      *
-     * LOG-01: Reads log_paths from API config, falls back to ['/var/log/laravel.log'].
-     * LOG-02: Processes each log file via tail -n 1000 / safeExec().
-     * LOG-03: Parses Monolog ERROR/WARNING/CRITICAL/ALERT/EMERGENCY lines.
-     * LOG-04: Returns structured entries per file with capped results.
-     * LOG-05: Missing/unreadable files return zero count — never crash.
-     * LOG-06: Directory paths are expanded to their *.log files (newest first,
-     *         capped at MAX_FILES) so directory log_paths yield real entries.
+     * LOG-01: `log_channels` selects Laravel channels; paths are resolved from
+     *         `config('logging.channels')` by the agent.
+     * LOG-02: A channel name is also accepted in the legacy `log_paths` field.
+     * LOG-03: Only bytes added since the last committed report are read.
+     * LOG-04: Rotation/truncation resets the offset; partial lines wait.
+     * LOG-05: All levels >= INFO are kept, DEBUG is skipped by default.
+     * LOG-06: Missing files and unsupported channels never throw.
      *
      * @param  array<string, mixed>  $config
-     * @return array<int, array{path: string, count: int, entries: array<int, array{datetime: string, message: string, level: string}>}>
+     * @return array<int, array<string, mixed>>
      */
     protected function doCollect(array $config): array
     {
-        $logPaths = $this->normalizeLogPaths($config['log_paths'] ?? []);
+        $this->pendingState = null;
+        $this->discovery = [];
 
-        if ($logPaths === []) {
-            $logPaths = $this->resolveDefaultLogPaths();
+        $channels = $this->normalizeChannels($config['log_channels'] ?? []);
+        $paths = $this->normalizeLogPaths($config['log_paths'] ?? []);
+
+        if ($channels === [] && $paths === []) {
+            $paths = $this->resolveDefaultLogPaths();
         }
 
+        $targets = $this->resolveTargets($channels, $paths);
+
+        try {
+            $this->discovery = $this->resolver()->discover();
+        } catch (\Throwable $e) {
+            $this->discovery = [];
+        }
+
+        if ($targets === []) {
+            return [];
+        }
+
+        $cursors = $this->store()->load();
+        $next = $cursors;
         $results = [];
+        $seenPaths = [];
 
-        foreach ($logPaths as $path) {
-            if (is_dir($path)) {
-                $results = array_merge($results, $this->collectFromDirectory($path));
-
-                continue;
+        foreach ($targets as $target) {
+            if ($target['resolved_path'] !== null) {
+                if (isset($seenPaths[$target['resolved_path']])) {
+                    continue;
+                }
+                $seenPaths[$target['resolved_path']] = true;
             }
 
-            if (! is_readable($path)) {
-                $results[] = [
-                    'path' => $path,
-                    'count' => 0,
-                    'entries' => [],
-                ];
+            [$result, $state] = $this->collectTarget($target, $cursors[$target['key']] ?? null);
 
-                continue;
+            if ($state !== null) {
+                $next[$target['key']] = $state;
             }
 
-            $results[] = $this->processLogFile($path);
+            if ($this->shouldReport($result)) {
+                $results[] = $result;
+            }
         }
+
+        $this->pendingState = $next;
 
         return $results;
     }
 
     /**
-     * Expand a directory path into its *.log files (newest first) and
-     * process each one. Returns a single zero-count result when the
-     * directory contains no log files.
-     *
-     * @return array<int, array{path: string, count: int, entries: array<int, array{datetime: string, message: string, level: string}>}>
+     * @param  string[]  $channels
+     * @param  string[]  $paths
+     * @return array<int, array{channel: ?string, identifier: string, resolved_path: ?string, key: string, error: ?string}>
      */
-    private function collectFromDirectory(string $dir): array
+    private function resolveTargets(array $channels, array $paths): array
+    {
+        $targets = [];
+        $seenKeys = [];
+        $seenPaths = [];
+
+        foreach ($channels as $channelName) {
+            $resolved = $this->resolver()->resolve($channelName);
+
+            foreach ($resolved as $target) {
+                $key = 'channel:'.$target['channel'];
+                $leaf = $target['channel'];
+
+                if (! $target['file_based'] || $target['path'] === null) {
+                    if (isset($seenKeys[$key])) {
+                        continue;
+                    }
+                    $seenKeys[$key] = true;
+                    $targets[] = [
+                        'channel' => $leaf,
+                        'identifier' => $leaf,
+                        'resolved_path' => null,
+                        'key' => $key,
+                        'error' => $target['error'] ?? 'not_file_based',
+                    ];
+
+                    continue;
+                }
+
+                if (isset($seenPaths[$target['path']]) || isset($seenKeys[$key])) {
+                    continue;
+                }
+
+                $seenPaths[$target['path']] = true;
+                $seenKeys[$key] = true;
+
+                $targets[] = [
+                    'channel' => $leaf,
+                    'identifier' => $leaf,
+                    'resolved_path' => $target['path'],
+                    'key' => $key,
+                    'error' => null,
+                ];
+            }
+        }
+
+        foreach ($paths as $path) {
+            if ($path === '') {
+                continue;
+            }
+
+            if (is_dir($path)) {
+                $files = $this->directoryFiles($path);
+
+                if ($files === []) {
+                    if (! isset($seenKeys['path:'.$path])) {
+                        $seenKeys['path:'.$path] = true;
+                        $targets[] = [
+                            'channel' => null,
+                            'identifier' => $path,
+                            'resolved_path' => null,
+                            'key' => 'path:'.$path,
+                            'error' => 'not_readable',
+                        ];
+                    }
+
+                    continue;
+                }
+
+                foreach ($files as $file) {
+                    if (isset($seenPaths[$file])) {
+                        continue;
+                    }
+                    $seenPaths[$file] = true;
+                    $targets[] = [
+                        'channel' => null,
+                        'identifier' => $path,
+                        'resolved_path' => $file,
+                        'key' => 'path:'.$file,
+                        'error' => null,
+                    ];
+                }
+
+                continue;
+            }
+
+            if (is_file($path) || is_readable($path)) {
+                if (isset($seenPaths[$path])) {
+                    continue;
+                }
+                $seenPaths[$path] = true;
+                $targets[] = [
+                    'channel' => null,
+                    'identifier' => $path,
+                    'resolved_path' => $path,
+                    'key' => 'path:'.$path,
+                    'error' => null,
+                ];
+
+                continue;
+            }
+
+            if ($this->resolver()->has($path)) {
+                foreach ($this->resolver()->resolve($path) as $target) {
+                    $key = 'channel:'.$target['channel'];
+
+                    if (! $target['file_based'] || $target['path'] === null) {
+                        if (isset($seenKeys[$key])) {
+                            continue;
+                        }
+                        $seenKeys[$key] = true;
+                        $targets[] = [
+                            'channel' => $target['channel'],
+                            'identifier' => $path,
+                            'resolved_path' => null,
+                            'key' => $key,
+                            'error' => $target['error'] ?? 'not_file_based',
+                        ];
+
+                        continue;
+                    }
+
+                    if (isset($seenPaths[$target['path']]) || isset($seenKeys[$key])) {
+                        continue;
+                    }
+
+                    $seenPaths[$target['path']] = true;
+                    $seenKeys[$key] = true;
+
+                    $targets[] = [
+                        'channel' => $target['channel'],
+                        'identifier' => $path,
+                        'resolved_path' => $target['path'],
+                        'key' => $key,
+                        'error' => null,
+                    ];
+                }
+
+                continue;
+            }
+
+            if (isset($seenPaths[$path])) {
+                continue;
+            }
+            $seenPaths[$path] = true;
+            $targets[] = [
+                'channel' => null,
+                'identifier' => $path,
+                'resolved_path' => null,
+                'key' => 'path:'.$path,
+                'error' => 'not_readable',
+            ];
+        }
+
+        return $targets;
+    }
+
+    /**
+     * @param  array{channel: ?string, identifier: string, resolved_path: ?string, key: string, error: ?string}  $target
+     * @param  array<string, mixed>|null  $cursor
+     * @return array{0: array<string, mixed>, 1: array<string, mixed>|null}
+     */
+    private function collectTarget(array $target, ?array $cursor): array
+    {
+        $result = [
+            'path' => $target['identifier'],
+            'channel' => $target['channel'],
+            'resolved_path' => $target['resolved_path'],
+            'cursor' => null,
+            'from_offset' => null,
+            'to_offset' => null,
+            'count' => 0,
+            'error_count' => 0,
+            'level_counts' => [],
+            'levels_skipped' => 0,
+            'truncated' => false,
+            'error' => $target['error'],
+            'entries' => [],
+        ];
+
+        if ($target['error'] !== null || $target['resolved_path'] === null) {
+            return [$result, null];
+        }
+
+        $path = $target['resolved_path'];
+
+        if (! is_readable($path)) {
+            $result['error'] = 'not_readable';
+
+            return [$result, null];
+        }
+
+        $delta = $this->readDelta($path, $cursor);
+
+        if ($delta === null) {
+            $result['error'] = 'read_failed';
+
+            return [$result, null];
+        }
+
+        if ($delta['raw'] === '') {
+            return [$result, $delta['state']];
+        }
+
+        $parsed = $this->parseEntries($delta['raw']);
+        $included = [];
+        $skipped = 0;
+        $firstExcludedOffset = null;
+
+        foreach ($parsed as $entry) {
+            if ($this->levelValue($entry['level']) < $this->minLevel()) {
+                $skipped++;
+
+                continue;
+            }
+
+            if (count($included) >= self::MAX_ENTRIES_PER_RUN) {
+                $firstExcludedOffset ??= $entry['offset'];
+
+                continue;
+            }
+
+            $included[] = $entry;
+        }
+
+        if ($firstExcludedOffset !== null) {
+            $delta['raw'] = substr($delta['raw'], 0, $firstExcludedOffset);
+            $delta['to'] = $delta['from'] + $firstExcludedOffset;
+            $delta['state'] = $this->stateFor(
+                $path,
+                (int) $delta['state']['inode'],
+                $delta['to'],
+            );
+        }
+
+        $entries = [];
+        $levelCounts = [];
+        $errorCount = 0;
+
+        foreach ($included as $entry) {
+            $level = $entry['level'];
+
+            $entries[] = [
+                'datetime' => $entry['datetime'],
+                'level' => $level,
+                'message' => $entry['message'],
+            ];
+
+            $levelCounts[$level] = ($levelCounts[$level] ?? 0) + 1;
+
+            if (in_array($level, ['ERROR', 'CRITICAL', 'ALERT', 'EMERGENCY'], true)) {
+                $errorCount++;
+            }
+        }
+
+        $result['cursor'] = sha1(
+            $path.'|'.$delta['from'].'|'.$delta['to'].'|'.sha1($delta['raw'])
+        );
+        $result['from_offset'] = $delta['from'];
+        $result['to_offset'] = $delta['to'];
+        $result['count'] = count($entries);
+        $result['error_count'] = $errorCount;
+        $result['level_counts'] = $levelCounts;
+        $result['levels_skipped'] = $skipped;
+        $result['truncated'] = $delta['dropped'];
+        $result['entries'] = $entries;
+
+        return [$result, $delta['state']];
+    }
+
+    /**
+     * Read the byte range that was added since the stored cursor.
+     *
+     * @param  array<string, mixed>|null  $cursor
+     * @return array{raw: string, from: int, to: int, dropped: bool, state: array<string, mixed>}|null
+     */
+    private function readDelta(string $path, ?array $cursor): ?array
+    {
+        $handle = @fopen($path, 'rb');
+
+        if ($handle === false) {
+            return null;
+        }
+
+        $stat = fstat($handle);
+
+        if ($stat === false) {
+            fclose($handle);
+
+            return null;
+        }
+
+        $size = (int) $stat['size'];
+        $inode = (int) $stat['ino'];
+        $start = 0;
+        $dropped = false;
+
+        if ($cursor === null || ! isset($cursor['offset'])) {
+            $start = max(0, $size - self::FIRST_RUN_BYTES);
+
+            if ($start > 0) {
+                $start = $this->alignToLineStart($handle, $start, $size);
+            }
+        } elseif (
+            ($cursor['path'] ?? null) !== $path
+            || (int) ($cursor['inode'] ?? -1) !== $inode
+            || $size < (int) $cursor['offset']
+            || ! $this->tailHashMatches($handle, $cursor)
+        ) {
+            $start = 0;
+        } else {
+            $start = (int) $cursor['offset'];
+        }
+
+        if ($start > $size) {
+            $start = $size;
+        }
+
+        if ($size - $start > self::MAX_BACKLOG_BYTES) {
+            $start = max(0, $size - self::BACKLOG_TAIL_BYTES);
+
+            if ($start > 0) {
+                $start = $this->alignToLineStart($handle, $start, $size);
+            }
+
+            $dropped = true;
+        }
+
+        fseek($handle, $start);
+
+        $remaining = min(self::MAX_BYTES_PER_RUN, $size - $start);
+        $raw = '';
+
+        while ($remaining > 0) {
+            $chunk = fread($handle, min(65536, $remaining));
+
+            if ($chunk === false || $chunk === '') {
+                break;
+            }
+
+            $raw .= $chunk;
+            $remaining -= strlen($chunk);
+        }
+
+        $lastNewline = strrpos($raw, "\n");
+
+        if ($lastNewline === false) {
+            // The read window contains no complete line. If it was full, skip
+            // to the next line boundary so one huge line cannot block the
+            // channel forever.
+            $dropTo = $start;
+
+            if ($raw !== '' && strlen($raw) >= self::MAX_BYTES_PER_RUN) {
+                $dropTo = $this->alignToLineStart($handle, $start + strlen($raw), $size);
+                $dropped = true;
+            }
+
+            $state = $this->stateFor($path, $inode, $dropTo);
+            fclose($handle);
+
+            return [
+                'raw' => '',
+                'from' => $start,
+                'to' => $dropTo,
+                'dropped' => $dropped,
+                'state' => $state,
+            ];
+        }
+
+        $raw = substr($raw, 0, $lastNewline + 1);
+        $to = $start + strlen($raw);
+        $state = $this->stateFor($path, $inode, $to);
+
+        fclose($handle);
+
+        return [
+            'raw' => $raw,
+            'from' => $start,
+            'to' => $to,
+            'dropped' => $dropped,
+            'state' => $state,
+        ];
+    }
+
+    /**
+     * Verify the bytes just before the cursor still match, detecting a
+     * truncate-and-regrow that kept the same inode and a similar size.
+     *
+     * @param  resource  $handle
+     * @param  array<string, mixed>  $cursor
+     */
+    private function tailHashMatches($handle, array $cursor): bool
+    {
+        $offset = (int) ($cursor['offset'] ?? 0);
+
+        if ($offset <= 0) {
+            return true;
+        }
+
+        $hash = $cursor['tail_hash'] ?? null;
+
+        if (! is_string($hash) || $hash === '') {
+            return true;
+        }
+
+        return hash_equals($hash, $this->hashBefore($handle, $offset));
+    }
+
+    /**
+     * Skip to the first complete line at or after $start.
+     *
+     * @param  resource  $handle
+     */
+    private function alignToLineStart($handle, int $start, int $size): int
+    {
+        if ($start <= 0) {
+            return 0;
+        }
+
+        if ($start >= $size) {
+            return $size;
+        }
+
+        fseek($handle, $start);
+
+        $scanned = 0;
+        $limit = 1048576;
+
+        while (! feof($handle) && $scanned < $limit) {
+            $chunk = fread($handle, 8192);
+
+            if ($chunk === false || $chunk === '') {
+                break;
+            }
+
+            $position = strpos($chunk, "\n");
+
+            if ($position !== false) {
+                return min($size, $start + $scanned + $position + 1);
+            }
+
+            $scanned += strlen($chunk);
+        }
+
+        return $size;
+    }
+
+    /**
+     * @param  resource  $handle
+     */
+    private function hashBefore($handle, int $offset): string
+    {
+        if ($offset <= 0) {
+            return '';
+        }
+
+        $length = min(256, $offset);
+
+        if (fseek($handle, $offset - $length) !== 0) {
+            return '';
+        }
+
+        $tail = fread($handle, $length);
+
+        return is_string($tail) ? sha1($tail) : '';
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function stateFor(string $path, int $inode, int $to): array
+    {
+        $handle = @fopen($path, 'rb');
+        $hash = '';
+
+        if ($handle !== false) {
+            $hash = $this->hashBefore($handle, $to);
+            fclose($handle);
+        }
+
+        return [
+            'path' => $path,
+            'inode' => $inode,
+            'offset' => $to,
+            'tail_hash' => $hash,
+            'updated_at' => time(),
+        ];
+    }
+
+    /**
+     * Parse raw lines into entries, keeping continuation lines attached.
+     *
+     * @return array<int, array{datetime: string, level: string, message: string, offset: int}>
+     */
+    private function parseEntries(string $raw): array
+    {
+        $entries = [];
+        $current = null;
+        $offset = 0;
+        $length = strlen($raw);
+
+        while ($offset < $length) {
+            $newline = strpos($raw, "\n", $offset);
+
+            if ($newline === false) {
+                $line = substr($raw, $offset);
+                $next = $length;
+            } else {
+                $line = substr($raw, $offset, $newline - $offset);
+                $next = $newline + 1;
+            }
+
+            $line = rtrim($line, "\r");
+
+            if (preg_match(self::MONOLOG_REGEX, $line, $matches)) {
+                if ($current !== null) {
+                    $entries[] = $current;
+                }
+
+                $current = [
+                    'datetime' => $matches[1],
+                    'level' => strtoupper($matches[3]),
+                    'message' => trim($matches[4]),
+                    'offset' => $offset,
+                ];
+            } elseif ($current !== null && strlen($current['message']) < self::MAX_ENTRY_BYTES) {
+                $current['message'] .= "\n".$line;
+            }
+
+            $offset = $next;
+        }
+
+        if ($current !== null) {
+            $entries[] = $current;
+        }
+
+        foreach ($entries as &$entry) {
+            $entry['message'] = rtrim($entry['message']);
+
+            if (strlen($entry['message']) > self::MAX_ENTRY_BYTES) {
+                $original = strlen($entry['message']);
+                $entry['message'] = substr($entry['message'], 0, self::MAX_ENTRY_BYTES)
+                    ."\n…[truncated ".($original - self::MAX_ENTRY_BYTES).' bytes]';
+            }
+        }
+        unset($entry);
+
+        return $entries;
+    }
+
+    private function levelValue(string $level): int
+    {
+        return self::LEVELS[strtoupper($level)] ?? self::LEVELS[self::DEFAULT_MIN_LEVEL];
+    }
+
+    private function minLevel(): int
+    {
+        return self::LEVELS[self::DEFAULT_MIN_LEVEL];
+    }
+
+    /**
+     * @param  array<string, mixed>  $result
+     */
+    private function shouldReport(array $result): bool
+    {
+        return $result['error'] !== null
+            || $result['truncated']
+            || $result['count'] > 0;
+    }
+
+    /**
+     * @param  array<int, mixed>  $channels
+     * @return string[]
+     */
+    private function normalizeChannels(array $channels): array
+    {
+        $names = [];
+
+        foreach ($channels as $entry) {
+            if (is_string($entry) && $entry !== '') {
+                $names[] = $entry;
+
+                continue;
+            }
+
+            if (is_array($entry)) {
+                $name = $entry['name'] ?? $entry['channel'] ?? $entry['label'] ?? null;
+
+                if (is_string($name) && $name !== '') {
+                    $names[] = $name;
+                }
+            }
+        }
+
+        return array_values(array_unique($names));
+    }
+
+    /**
+     * Normalize log paths from mixed formats to a flat string[].
+     *
+     * Handles:
+     *   - string[]: ["/var/log/laravel.log"]
+     *   - object[]: [{"label": "app", "path": "/var/log/app.log"}]
+     *   - map:      {"app": "/var/log/app.log"}
+     *
+     * @param  array<int|string, mixed>  $paths
+     * @return string[]
+     */
+    private function normalizeLogPaths(array $paths): array
+    {
+        $normalized = [];
+
+        foreach ($paths as $entry) {
+            if (is_string($entry) && $entry !== '') {
+                $normalized[] = $entry;
+            } elseif (is_array($entry) && isset($entry['path']) && is_string($entry['path']) && $entry['path'] !== '') {
+                $normalized[] = $entry['path'];
+            }
+        }
+
+        return array_values(array_unique($normalized));
+    }
+
+    /**
+     * Expand a directory path into its *.log files (newest first).
+     *
+     * @return string[]
+     */
+    private function directoryFiles(string $dir): array
     {
         $pattern = rtrim(str_replace('\\', '/', $dir), '/').'/*.log';
         $files = glob($pattern);
 
         if (! is_array($files) || $files === []) {
-            return [
-                [
-                    'path' => $dir,
-                    'count' => 0,
-                    'entries' => [],
-                ],
-            ];
+            return [];
         }
 
         rsort($files);
-        $files = array_slice($files, 0, self::MAX_FILES);
 
-        $results = [];
-
-        foreach ($files as $file) {
-            if (! is_readable($file)) {
-                $results[] = [
-                    'path' => $file,
-                    'count' => 0,
-                    'entries' => [],
-                ];
-
-                continue;
-            }
-
-            $results[] = $this->processLogFile($file);
-        }
-
-        return $results;
+        return array_map(
+            static fn (string $file): string => str_replace('\\', '/', $file),
+            array_slice($files, 0, self::MAX_FILES)
+        );
     }
 
     /**
-     * Find the latest Laravel log file when no paths are configured.
-     *
-     * Handles both single-file and daily-rotation (laravel-YYYY-MM-DD.log).
+     * Find the latest Laravel log file when nothing is configured.
      *
      * @return string[]
      */
@@ -135,7 +839,6 @@ class LogsCollector extends BaseCollector
         }
 
         $logDir = storage_path('logs');
-        $candidates = [];
 
         if (is_dir($logDir)) {
             $files = glob($logDir.DIRECTORY_SEPARATOR.'laravel-*.log');
@@ -143,207 +846,20 @@ class LogsCollector extends BaseCollector
             if (is_array($files) && $files !== []) {
                 rsort($files);
 
-                return [reset($files)];
+                return [str_replace('\\', '/', (string) reset($files))];
             }
         }
 
-        return [storage_path('logs/laravel.log')];
+        return [str_replace('\\', '/', storage_path('logs/laravel.log'))];
     }
 
-    /**
-     * Normalize log paths from mixed formats to a flat string[].
-     *
-     * Handles both:
-     *   - string[]: ["/var/log/laravel.log"]
-     *   - object[]: [{"label": "app", "path": "/var/log/app.log"}]
-     *
-     * @param  array<int, mixed>  $paths
-     * @return string[]
-     */
-    private function normalizeLogPaths(array $paths): array
+    private function resolver(): LogChannelResolver
     {
-        $normalized = [];
-        foreach ($paths as $entry) {
-            if (is_string($entry)) {
-                $normalized[] = $entry;
-            } elseif (is_array($entry) && isset($entry['path']) && is_string($entry['path'])) {
-                $normalized[] = $entry['path'];
-            }
-        }
-
-        return $normalized;
+        return $this->resolver ??= new LogChannelResolver;
     }
 
-    /**
-     * Process a single log file and return structured results.
-     *
-     * Uses tail -n 1000 via shell when available (fast, OOM-safe).
-     * Falls back to PHP native fseek + fread when shell is unavailable.
-     * Parses Monolog entries matching 5 error levels, capped at MAX_ENTRIES.
-     *
-     * @param  string  $path  Absolute path to the log file
-     * @return array{path: string, count: int, entries: array<int, array{datetime: string, message: string, level: string}>}
-     */
-    private function processLogFile(string $path): array
+    private function store(): LogCursorStore
     {
-        $output = $this->readLastLines($path, 1000);
-
-        if ($output === null) {
-            return [
-                'path' => $path,
-                'count' => 0,
-                'entries' => [],
-            ];
-        }
-
-        return $this->parseLogOutput($path, $output);
-    }
-
-    /**
-     * Read the last N lines from a file.
-     *
-     * Prefers shell tail for speed and OOM safety on huge files.
-     * Falls back to PHP fseek/fread when shell_exec is unavailable
-     * (Windows, restricted hosting).
-     *
-     * @return string|null Contents on success, null on failure
-     */
-    private function readLastLines(string $path, int $maxLines): ?string
-    {
-        $output = $this->safeExec(
-            'tail -n '.$maxLines.' '.escapeshellarg($path).' 2>/dev/null'
-        );
-
-        if ($output !== null) {
-            return $output;
-        }
-
-        return $this->tailViaPhp($path, $maxLines);
-    }
-
-    /**
-     * Read last N lines via native PHP — no shell dependency.
-     *
-     * Uses fseek to read backwards in chunks, buffering only
-     * the last ~N lines in memory regardless of file size.
-     *
-     * @return string|null Content on success, null on failure
-     */
-    private function tailViaPhp(string $path, int $maxLines): ?string
-    {
-        $handle = @fopen($path, 'r');
-
-        if ($handle === false) {
-            return null;
-        }
-
-        $buffer = '';
-        $lineCount = 0;
-        $chunkSize = 8192;
-
-        fseek($handle, 0, SEEK_END);
-        $position = ftell($handle);
-
-        while ($position > 0 && $lineCount <= $maxLines) {
-            $readSize = min($chunkSize, $position);
-            $position -= $readSize;
-            fseek($handle, $position);
-            $chunk = fread($handle, $readSize);
-            $buffer = $chunk.$buffer;
-            $lineCount = substr_count($buffer, "\n");
-        }
-
-        fclose($handle);
-
-        if ($buffer === '') {
-            return null;
-        }
-
-        $lines = explode("\n", $buffer);
-        $lines = array_slice($lines, -$maxLines);
-
-        return implode("\n", $lines);
-    }
-
-    /**
-     * Parse log output and extract structured Monolog entries.
-     *
-     * Entries matching the reporting date (today) are preferred. When
-     * there are none, entries from the most recent available date are
-     * used instead, so the payload is never empty just because no log
-     * was written today.
-     *
-     * @param  string  $output  Raw log lines
-     * @return array{path: string, count: int, entries: array<int, array{datetime: string, message: string, level: string}>}
-     */
-    private function parseLogOutput(string $path, string $output): array
-    {
-        $lines = explode("\n", $output);
-        $entries = [];
-
-        foreach ($lines as $line) {
-            if (preg_match(self::MONOLOG_REGEX, $line, $matches)) {
-                $entries[] = [
-                    'datetime' => $matches[1],
-                    'message' => trim($matches[4]),
-                    'level' => $matches[3],
-                ];
-            }
-        }
-
-        $entries = $this->selectReportingEntries($entries);
-
-        $count = count($entries);
-        $capped = array_slice($entries, 0, self::MAX_ENTRIES);
-
-        return [
-            'path' => $path,
-            'count' => $count,
-            'entries' => $capped,
-        ];
-    }
-
-    /**
-     * Keep entries for the reporting date; fall back to the most recent
-     * available date when the reporting date has none.
-     *
-     * @param  array<int, array{datetime: string, message: string, level: string}>  $entries
-     * @return array<int, array{datetime: string, message: string, level: string}>
-     */
-    private function selectReportingEntries(array $entries): array
-    {
-        if ($entries === []) {
-            return [];
-        }
-
-        $reportingDate = $this->reportingDate();
-        $byDate = [];
-
-        foreach ($entries as $entry) {
-            $byDate[substr($entry['datetime'], 0, 10)][] = $entry;
-        }
-
-        if (isset($byDate[$reportingDate])) {
-            return $byDate[$reportingDate];
-        }
-
-        krsort($byDate);
-
-        return reset($byDate);
-    }
-
-    /**
-     * The date (YYYY-MM-DD) used to filter log entries.
-     *
-     * Defaults to the current local date, honoring Laravel's timezone
-     * when available so the filter matches the report timestamp.
-     */
-    protected function reportingDate(): string
-    {
-        if (function_exists('now')) {
-            return now()->format('Y-m-d');
-        }
-
-        return date('Y-m-d');
+        return $this->cursorStore ??= new LogCursorStore;
     }
 }

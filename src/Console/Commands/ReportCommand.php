@@ -3,6 +3,9 @@
 namespace ServerPulse\Agent\Console\Commands;
 
 use Illuminate\Console\Command;
+use ServerPulse\Agent\Collectors\Contracts\CollectorInterface;
+use ServerPulse\Agent\Contracts\CommitsAfterReport;
+use ServerPulse\Agent\Contracts\ProvidesExtraPayload;
 use ServerPulse\Agent\Services\ConfigService;
 use ServerPulse\Agent\Services\ReportService;
 
@@ -40,7 +43,8 @@ class ReportCommand extends Command
                 return self::SUCCESS;
             }
 
-            $payload = $this->buildPayload($config);
+            $collectors = $this->collectors();
+            $payload = $this->buildPayload($config, $collectors);
 
             $this->info('Payload keys: '.implode(', ', array_keys($payload)));
             $this->info('API URL: '.$this->config->resolveApiBase().'/v1/agent/report');
@@ -52,6 +56,7 @@ class ReportCommand extends Command
             $result = $this->report->send($payload, $this->config);
 
             if ($result['success']) {
+                $this->commitCollectors($collectors);
                 $this->info('Report sent successfully.');
 
                 return self::SUCCESS;
@@ -74,18 +79,33 @@ class ReportCommand extends Command
     }
 
     /**
+     * @return array<int, CollectorInterface>
+     */
+    private function collectors(): array
+    {
+        $collectors = app()->tagged('serverpulse.collectors');
+
+        return array_values(array_filter(
+            is_array($collectors) ? $collectors : iterator_to_array($collectors, false),
+            static fn (mixed $collector): bool => $collector instanceof CollectorInterface,
+        ));
+    }
+
+    /**
      * @param  array<string, mixed>  $config
+     * @param  array<int, CollectorInterface>  $collectors
      * @return array<string, mixed>
      */
-    private function buildPayload(array $config): array
+    private function buildPayload(array $config, array $collectors): array
     {
         $payload = [
             'timestamp' => now()->toIso8601ZuluString(),
-            'agent_ver' => '1.0',
+            'agent_ver' => '1.1',
             'heartbeat' => true,
         ];
 
-        $collectors = app()->tagged('serverpulse.collectors');
+        /** @var array<int, CollectorInterface> $ranCollectors */
+        $ranCollectors = [];
 
         foreach ($collectors as $collector) {
             $key = $collector->key();
@@ -94,6 +114,8 @@ class ReportCommand extends Command
                 continue;
             }
 
+            $ranCollectors[] = $collector;
+
             try {
                 $payload[$key] = $collector->collect($config);
             } catch (\Throwable $e) {
@@ -101,7 +123,37 @@ class ReportCommand extends Command
             }
         }
 
+        foreach ($ranCollectors as $collector) {
+            if (! $collector instanceof ProvidesExtraPayload) {
+                continue;
+            }
+
+            try {
+                $payload = array_merge($payload, $collector->extraPayload());
+            } catch (\Throwable $e) {
+                // Extra metadata is optional; never fail a report over it.
+            }
+        }
+
         return $payload;
+    }
+
+    /**
+     * @param  array<int, CollectorInterface>  $collectors
+     */
+    private function commitCollectors(array $collectors): void
+    {
+        foreach ($collectors as $collector) {
+            if (! $collector instanceof CommitsAfterReport) {
+                continue;
+            }
+
+            try {
+                $collector->commit();
+            } catch (\Throwable $e) {
+                // A failed commit means the next run re-sends the same delta.
+            }
+        }
     }
 
     private function acquireLock(): bool

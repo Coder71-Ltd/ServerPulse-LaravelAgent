@@ -71,7 +71,7 @@ it('fetches from API when cache is stale and writes fresh cache', function () {
     Http::assertSent(function (Request $request) {
         return $request->url() === 'https://test.example.com/v1/agent/config'
             && $request->method() === 'GET'
-            && $request->header('X-Agent-Version')[0] === '1.0'
+            && $request->header('X-Agent-Version')[0] === '1.1'
             && is_string($request->header('X-Agent-Domain')[0] ?? null)
             && ($request->header('X-API-Key')[0] ?? '') === 'test_key_123';
     });
@@ -119,6 +119,7 @@ it('uses fallback defaults when no cache and API is unreachable', function () {
     $result = $service->get();
 
     expect($result['enabled'])->toBeTrue();
+    expect($result['log_channels'])->toBe([]);
     expect($result['log_paths'])->toBe([]);
     expect($result['git_paths'])->toBe([]);
     expect($result['collect'])->toHaveKeys(['server', 'web', 'php', 'database', 'git', 'logs', 'security', 'laravel', 'domain']);

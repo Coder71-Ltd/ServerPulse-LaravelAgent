@@ -15,7 +15,7 @@ class ReportService
         try {
             $headers = [
                 'Content-Type' => 'application/json',
-                'X-Agent-Version' => '1.0',
+                'X-Agent-Version' => '1.1',
                 'X-Agent-Domain' => $config->resolveAgentDomain(),
             ];
 
