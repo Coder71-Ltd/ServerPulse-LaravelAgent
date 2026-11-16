@@ -149,9 +149,11 @@ class ReportCommand extends Command
             }
 
             try {
-                $collector->commit();
+                if (! $collector->commit()) {
+                    $this->warn("Failed to persist {$collector->key()} state; the same batch may be resent.");
+                }
             } catch (\Throwable $e) {
-                // A failed commit means the next run re-sends the same delta.
+                $this->warn("Failed to persist {$collector->key()} state; the same batch may be resent.");
             }
         }
     }

@@ -52,34 +52,46 @@ class LogCursorStore
 
     /**
      * @param  array<string, mixed>  $state
+     * @return bool True when the state was written.
      */
-    public function save(array $state): void
+    public function save(array $state): bool
     {
         $path = $this->path();
         $directory = dirname($path);
 
         if (! is_dir($directory)) {
-            @mkdir($directory, 0755, true);
+            @mkdir($directory, 0775, true);
         }
 
         $contents = json_encode($state, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
 
         if ($contents === false) {
-            return;
+            return false;
         }
 
-        $temporary = $path.'.tmp';
+        // Unique temp name so two app instances on the same host cannot
+        // clobber each other's temporary file.
+        $temporary = $path.'.'.getmypid().'.'.uniqid('', true).'.tmp';
 
-        if (@file_put_contents($temporary, $contents) === false) {
-            return;
-        }
+        if (@file_put_contents($temporary, $contents) !== false) {
+            if (DIRECTORY_SEPARATOR === '\\' && file_exists($path)) {
+                @unlink($path);
+            }
 
-        if (DIRECTORY_SEPARATOR === '\\' && file_exists($path)) {
-            @unlink($path);
-        }
+            if (! is_dir($path) && @rename($temporary, $path)) {
+                return true;
+            }
 
-        if (! @rename($temporary, $path)) {
             @unlink($temporary);
         }
+
+        // The directory can be read-only while the file itself is writable
+        // (for example a previous run created it as another user). Fall back
+        // to writing in place instead of losing the cursor.
+        if (is_dir($path)) {
+            return false;
+        }
+
+        return @file_put_contents($path, $contents, LOCK_EX) !== false;
     }
 }

@@ -31,11 +31,6 @@ class LogsCollector extends BaseCollector implements CommitsAfterReport, Provide
     private const DEFAULT_MIN_LEVEL = 'INFO';
 
     /**
-     * On a first run only ship the recent tail, never the whole file.
-     */
-    private const FIRST_RUN_BYTES = 32768;
-
-    /**
      * Upper bound on bytes read for one channel in one report.
      */
     private const MAX_BYTES_PER_RUN = 262144;
@@ -71,6 +66,15 @@ class LogsCollector extends BaseCollector implements CommitsAfterReport, Provide
      */
     private array $discovery = [];
 
+    /**
+     * Optional initial tail for a channel with no cursor yet.
+     *
+     * Defaults to 0: the first run starts at EOF and sends nothing, so a lost
+     * cursor can never cause the same tail to be re-shipped. Set
+     * `log_first_run_bytes` in the config to opt into an initial tail.
+     */
+    private int $firstRunBytes = 0;
+
     public function __construct(
         ?LogChannelResolver $resolver = null,
         ?LogCursorStore $cursorStore = null,
@@ -87,19 +91,23 @@ class LogsCollector extends BaseCollector implements CommitsAfterReport, Provide
     /**
      * Persist the read offsets only after the report was accepted.
      */
-    public function commit(): void
+    public function commit(): bool
     {
         if ($this->pendingState === null) {
-            return;
+            return true;
         }
 
         try {
-            $this->store()->save($this->pendingState);
+            if (! $this->store()->save($this->pendingState)) {
+                return false;
+            }
         } catch (\Throwable $e) {
-            return;
+            return false;
         }
 
         $this->pendingState = null;
+
+        return true;
     }
 
     /**
@@ -117,9 +125,10 @@ class LogsCollector extends BaseCollector implements CommitsAfterReport, Provide
      *         `config('logging.channels')` by the agent.
      * LOG-02: A channel name is also accepted in the legacy `log_paths` field.
      * LOG-03: Only bytes added since the last committed report are read.
-     * LOG-04: Rotation/truncation resets the offset; partial lines wait.
-     * LOG-05: All levels >= INFO are kept, DEBUG is skipped by default.
-     * LOG-06: Missing files and unsupported channels never throw.
+     * LOG-04: A first run starts at EOF; `log_first_run_bytes` opts into a tail.
+     * LOG-05: Rotation/truncation resets the offset; partial lines wait.
+     * LOG-06: All levels >= INFO are kept, DEBUG is skipped by default.
+     * LOG-07: Missing files and unsupported channels never throw.
      *
      * @param  array<string, mixed>  $config
      * @return array<int, array<string, mixed>>
@@ -128,6 +137,7 @@ class LogsCollector extends BaseCollector implements CommitsAfterReport, Provide
     {
         $this->pendingState = null;
         $this->discovery = [];
+        $this->firstRunBytes = max(0, (int) ($config['log_first_run_bytes'] ?? 0));
 
         $channels = $this->normalizeChannels($config['log_channels'] ?? []);
         $paths = $this->normalizeLogPaths($config['log_paths'] ?? []);
@@ -480,10 +490,16 @@ class LogsCollector extends BaseCollector implements CommitsAfterReport, Provide
         $dropped = false;
 
         if ($cursor === null || ! isset($cursor['offset'])) {
-            $start = max(0, $size - self::FIRST_RUN_BYTES);
+            // No cursor yet: start at EOF by default. An optional initial
+            // tail is only read when `log_first_run_bytes` is configured.
+            if ($this->firstRunBytes > 0) {
+                $start = max(0, $size - $this->firstRunBytes);
 
-            if ($start > 0) {
-                $start = $this->alignToLineStart($handle, $start, $size);
+                if ($start > 0) {
+                    $start = $this->alignToLineStart($handle, $start, $size);
+                }
+            } else {
+                $start = $size;
             }
         } elseif (
             ($cursor['path'] ?? null) !== $path

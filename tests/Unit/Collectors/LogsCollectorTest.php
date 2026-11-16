@@ -44,9 +44,7 @@ it('sends only lines added since the last committed run', function () {
     $first = $collector->collect(['log_channels' => ['sms']]);
     $collector->commit();
 
-    expect($first)->toHaveCount(1);
-    expect($first[0]['count'])->toBe(2);
-    expect($first[0]['channel'])->toBe('sms');
+    expect($first)->toBe([]);
 
     file_put_contents($file, spMonolog('INFO', 'three')."\n", FILE_APPEND);
 
@@ -68,18 +66,42 @@ it('does not advance the cursor until commit is called', function () {
 
     file_put_contents($file, spMonolog('INFO', 'one')."\n");
 
-    $first = $collector->collect(['log_channels' => ['sms']]);
-    $again = $collector->collect(['log_channels' => ['sms']]);
+    $config = ['log_channels' => ['sms'], 'log_first_run_bytes' => 65536];
+
+    $first = $collector->collect($config);
+    $again = $collector->collect($config);
 
     expect($first[0]['count'])->toBe(1);
     expect($again[0]['count'])->toBe(1);
 
     $collector->commit();
 
-    expect($collector->collect(['log_channels' => ['sms']]))->toBe([]);
+    expect($collector->collect($config))->toBe([]);
 });
 
-it('does not send the whole file on the first run', function () {
+it('reports a failed cursor write and keeps the batch retryable', function () {
+    $dir = spCollectorDir();
+    $file = $dir.'/app.log';
+
+    $collector = new LogsCollector(
+        new LogChannelResolver(['app' => ['driver' => 'single', 'path' => $file]]),
+        new LogCursorStore($dir),
+    );
+
+    file_put_contents($file, spMonolog('INFO', 'one')."\n");
+
+    $config = ['log_channels' => ['app'], 'log_first_run_bytes' => 65536];
+
+    expect($collector->collect($config))->toHaveCount(1);
+    expect($collector->commit())->toBeFalse();
+
+    // The pending state is kept, so the same batch is retried next time.
+    $retry = $collector->collect($config);
+
+    expect($retry[0]['count'])->toBe(1);
+});
+
+it('starts at the end of the file on the first run', function () {
     $dir = spCollectorDir();
     $file = $dir.'/app.log';
     $collector = spCollector(['app' => ['driver' => 'single', 'path' => $file]], $dir.'/state.json');
@@ -90,11 +112,18 @@ it('does not send the whole file on the first run', function () {
     }
     file_put_contents($file, implode("\n", $lines)."\n");
 
-    $result = $collector->collect(['log_channels' => ['app']]);
+    $first = $collector->collect(['log_channels' => ['app']]);
+    $collector->commit();
 
-    expect($result[0]['count'])->toBeLessThan(2000);
-    expect($result[0]['count'])->toBeGreaterThan(0);
-    expect($result[0]['from_offset'])->toBeGreaterThan(0);
+    expect($first)->toBe([]);
+
+    file_put_contents($file, spMonolog('INFO', 'after baseline')."\n", FILE_APPEND);
+
+    $second = $collector->collect(['log_channels' => ['app']]);
+
+    expect($second[0]['count'])->toBe(1);
+    expect($second[0]['entries'][0]['message'])->toBe('after baseline');
+    expect($second[0]['from_offset'])->toBeGreaterThan(0);
 });
 
 it('caps entries per run and continues on the next run', function () {
@@ -108,7 +137,7 @@ it('caps entries per run and continues on the next run', function () {
     }
     file_put_contents($file, implode("\n", $lines)."\n");
 
-    $first = $collector->collect(['log_channels' => ['app']]);
+    $first = $collector->collect(['log_channels' => ['app'], 'log_first_run_bytes' => 65536]);
     $collector->commit();
 
     expect($first[0]['count'])->toBe(500);
@@ -129,7 +158,7 @@ it('starts from the beginning when a daily file rotates', function () {
     $first = $collector->collect(['log_channels' => ['sms']]);
     $collector->commit();
 
-    expect($first[0]['entries'][0]['message'])->toBe('yesterday');
+    expect($first)->toBe([]);
 
     $secondFile = $dir.'/sms-2026-11-16.log';
     file_put_contents($secondFile, spMonolog('INFO', 'today')."\n");
@@ -187,8 +216,13 @@ it('waits for a complete line before consuming it', function () {
     $file = $dir.'/app.log';
     $collector = spCollector(['app' => ['driver' => 'single', 'path' => $file]], $dir.'/state.json');
 
+    // Establish a cursor after a complete line.
+    file_put_contents($file, spMonolog('INFO', 'first')."\n");
+    $collector->collect(['log_channels' => ['app']]);
+    $collector->commit();
+
     $partial = '['.date('Y-m-d H:i:s').'] local.INFO: hel';
-    file_put_contents($file, $partial);
+    file_put_contents($file, $partial, FILE_APPEND);
 
     $first = $collector->collect(['log_channels' => ['app']]);
     $collector->commit();
@@ -216,7 +250,7 @@ it('keeps stack trace continuation lines with their entry', function () {
         '',
     ]));
 
-    $result = $collector->collect(['log_channels' => ['app']]);
+    $result = $collector->collect(['log_channels' => ['app'], 'log_first_run_bytes' => 65536]);
 
     expect($result[0]['entries'])->toHaveCount(2);
     expect($result[0]['entries'][0]['message'])->toContain('First error');
@@ -236,7 +270,7 @@ it('includes INFO entries and skips DEBUG by default', function () {
         '',
     ]));
 
-    $result = $collector->collect(['log_channels' => ['app']]);
+    $result = $collector->collect(['log_channels' => ['app'], 'log_first_run_bytes' => 65536]);
     $levels = array_column($result[0]['entries'], 'level');
 
     expect($levels)->toBe(['INFO', 'ERROR']);
@@ -248,7 +282,13 @@ it('advances past filtered debug lines without resending them', function () {
     $file = $dir.'/app.log';
     $collector = spCollector(['app' => ['driver' => 'single', 'path' => $file]], $dir.'/state.json');
 
-    file_put_contents($file, spMonolog('DEBUG', 'only debug')."\n");
+    file_put_contents($file, '');
+
+    // First run establishes the cursor at EOF.
+    expect($collector->collect(['log_channels' => ['app']]))->toBe([]);
+    $collector->commit();
+
+    file_put_contents($file, spMonolog('DEBUG', 'only debug')."\n", FILE_APPEND);
 
     expect($collector->collect(['log_channels' => ['app']]))->toBe([]);
     $collector->commit();
@@ -268,7 +308,7 @@ it('truncates very large log lines', function () {
 
     file_put_contents($file, spMonolog('ERROR', str_repeat('a', 20000))."\n");
 
-    $result = $collector->collect(['log_channels' => ['app']]);
+    $result = $collector->collect(['log_channels' => ['app'], 'log_first_run_bytes' => 65536]);
     $message = $result[0]['entries'][0]['message'];
 
     expect(strlen($message))->toBeLessThan(20000);
@@ -284,6 +324,7 @@ it('accepts a channel name in the legacy log_paths field', function () {
 
     $result = $collector->collect([
         'log_paths' => [['label' => 'sms', 'path' => 'sms']],
+        'log_first_run_bytes' => 65536,
     ]);
 
     expect($result)->toHaveCount(1);
@@ -333,7 +374,7 @@ it('still expands a directory log path into its log files', function () {
 
     $collector = spCollector([], $dir.'/state.json');
 
-    $result = $collector->collect(['log_paths' => [$logs]]);
+    $result = $collector->collect(['log_paths' => [$logs], 'log_first_run_bytes' => 65536]);
     $collector->commit();
 
     expect($result)->toHaveCount(2);

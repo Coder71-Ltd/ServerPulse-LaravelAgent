@@ -42,6 +42,7 @@ function spWriteReportConfig(string $dir, array $overrides = []): string
         'enabled' => true,
         'log_channels' => ['app'],
         'log_paths' => [],
+        'log_first_run_bytes' => 32768,
         'git_paths' => [],
         'collect' => ['logs' => true],
     ], $overrides)));
@@ -164,6 +165,74 @@ it('commits log cursors and sends channel metadata after a successful report', f
                 && count($channels) === 1
                 && $channels[0]['name'] === 'app';
         });
+    } finally {
+        @unlink($statePath);
+        @unlink($dir.'/config.json');
+        @unlink($dir.'/app.log');
+        @rmdir($dir);
+    }
+});
+
+it('sends an empty logs array when there are no new lines', function () {
+    [$collector, $statePath, $dir] = spReportFixture(
+        '['.date('Y-m-d H:i:s')."] local.INFO: once\n"
+    );
+
+    try {
+        $this->app->instance(LogsCollector::class, $collector);
+        $this->app->instance(ConfigService::class, new ConfigService(spWriteReportConfig($dir)));
+
+        $payloads = [];
+
+        Http::fake(function ($request) use (&$payloads) {
+            $payloads[] = $request->data();
+
+            return Http::response(['status' => 'accepted'], 202);
+        });
+
+        $this->artisan('serverpulse:report')->assertSuccessful();
+        $this->artisan('serverpulse:report')->assertSuccessful();
+
+        expect($payloads)->toHaveCount(2);
+        expect($payloads[0]['logs'])->toHaveCount(1);
+        expect($payloads[1]['logs'])->toBe([]);
+    } finally {
+        @unlink($statePath);
+        @unlink($dir.'/config.json');
+        @unlink($dir.'/app.log');
+        @rmdir($dir);
+    }
+});
+
+it('re-sends a batch after a failed report and stops after a successful retry', function () {
+    [$collector, $statePath, $dir] = spReportFixture(
+        '['.date('Y-m-d H:i:s')."] local.INFO: once\n"
+    );
+
+    try {
+        $this->app->instance(LogsCollector::class, $collector);
+        $this->app->instance(ConfigService::class, new ConfigService(spWriteReportConfig($dir)));
+
+        $payloads = [];
+        $attempt = 0;
+
+        Http::fake(function ($request) use (&$payloads, &$attempt) {
+            $payloads[] = $request->data();
+            $attempt++;
+
+            return $attempt === 1
+                ? Http::response(['error' => 'down'], 500)
+                : Http::response(['status' => 'accepted'], 202);
+        });
+
+        $this->artisan('serverpulse:report')->assertSuccessful();
+        $this->artisan('serverpulse:report')->assertSuccessful();
+        $this->artisan('serverpulse:report')->assertSuccessful();
+
+        expect($payloads)->toHaveCount(3);
+        expect($payloads[0]['logs'])->toHaveCount(1);
+        expect($payloads[1]['logs'])->toHaveCount(1);
+        expect($payloads[2]['logs'])->toBe([]);
     } finally {
         @unlink($statePath);
         @unlink($dir.'/config.json');

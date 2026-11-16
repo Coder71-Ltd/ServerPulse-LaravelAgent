@@ -34,8 +34,20 @@ it('persists and reloads cursor state', function () {
 
     expect(file_exists($path))->toBeTrue();
     expect((new LogCursorStore($path))->load())->toBe($state);
+    expect((new LogCursorStore($path))->save($state))->toBeTrue();
 
     unlink($path);
+    rmdir(dirname($path));
+});
+
+it('returns false when the state path is a directory', function () {
+    $path = tempCursorPath();
+    mkdir(dirname($path), 0777, true);
+    mkdir($path);
+
+    expect((new LogCursorStore($path))->save(['x' => ['offset' => 1]]))->toBeFalse();
+
+    rmdir($path);
     rmdir(dirname($path));
 });
 

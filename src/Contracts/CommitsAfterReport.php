@@ -10,5 +10,8 @@ namespace ServerPulse\Agent\Contracts;
  */
 interface CommitsAfterReport
 {
-    public function commit(): void;
+    /**
+     * @return bool True when the buffered state was persisted.
+     */
+    public function commit(): bool;
 }
