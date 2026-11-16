@@ -29,7 +29,7 @@ class LogCursorStore
     }
 
     /**
-     * @return array<string, array<string, mixed>>
+     * @return array<string, mixed>
      */
     public function load(): array
     {

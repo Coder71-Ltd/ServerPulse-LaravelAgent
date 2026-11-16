@@ -31,6 +31,19 @@ class LogsCollector extends BaseCollector implements CommitsAfterReport, Provide
     private const DEFAULT_MIN_LEVEL = 'INFO';
 
     /**
+     * Bump when the cursor state format or first-run policy changes.
+     *
+     * Version 2 re-reads the initial tail once after upgrading from a state
+     * file that started at EOF.
+     */
+    private const STATE_VERSION = 2;
+
+    /**
+     * Default number of bytes to ship once when a channel has no cursor.
+     */
+    private const DEFAULT_FIRST_RUN_BYTES = 32768;
+
+    /**
      * Upper bound on bytes read for one channel in one report.
      */
     private const MAX_BYTES_PER_RUN = 262144;
@@ -57,7 +70,7 @@ class LogsCollector extends BaseCollector implements CommitsAfterReport, Provide
     private ?LogCursorStore $cursorStore;
 
     /**
-     * @var array<string, array<string, mixed>>|null
+     * @var array<string, mixed>|null
      */
     private ?array $pendingState = null;
 
@@ -69,11 +82,11 @@ class LogsCollector extends BaseCollector implements CommitsAfterReport, Provide
     /**
      * Optional initial tail for a channel with no cursor yet.
      *
-     * Defaults to 0: the first run starts at EOF and sends nothing, so a lost
-     * cursor can never cause the same tail to be re-shipped. Set
-     * `log_first_run_bytes` in the config to opt into an initial tail.
+     * The server normally sends `log_first_run_bytes = 32768`, so a new
+     * channel gets one tail for immediate visibility. Set it to 0 to start
+     * at EOF instead.
      */
-    private int $firstRunBytes = 0;
+    private int $firstRunBytes = self::DEFAULT_FIRST_RUN_BYTES;
 
     public function __construct(
         ?LogChannelResolver $resolver = null,
@@ -125,7 +138,7 @@ class LogsCollector extends BaseCollector implements CommitsAfterReport, Provide
      *         `config('logging.channels')` by the agent.
      * LOG-02: A channel name is also accepted in the legacy `log_paths` field.
      * LOG-03: Only bytes added since the last committed report are read.
-     * LOG-04: A first run starts at EOF; `log_first_run_bytes` opts into a tail.
+     * LOG-04: A first run ships the recent tail (`log_first_run_bytes`).
      * LOG-05: Rotation/truncation resets the offset; partial lines wait.
      * LOG-06: All levels >= INFO are kept, DEBUG is skipped by default.
      * LOG-07: Missing files and unsupported channels never throw.
@@ -137,7 +150,7 @@ class LogsCollector extends BaseCollector implements CommitsAfterReport, Provide
     {
         $this->pendingState = null;
         $this->discovery = [];
-        $this->firstRunBytes = max(0, (int) ($config['log_first_run_bytes'] ?? 0));
+        $this->firstRunBytes = max(0, (int) ($config['log_first_run_bytes'] ?? self::DEFAULT_FIRST_RUN_BYTES));
 
         $channels = $this->normalizeChannels($config['log_channels'] ?? []);
         $paths = $this->normalizeLogPaths($config['log_paths'] ?? []);
@@ -159,6 +172,18 @@ class LogsCollector extends BaseCollector implements CommitsAfterReport, Provide
         }
 
         $cursors = $this->store()->load();
+        $hasStoredState = $cursors !== [];
+
+        // A version bump re-reads the initial tail once, so installs that
+        // started at EOF can show history after upgrading. Force the tail even
+        // if an older server still sends `log_first_run_bytes: 0`. A brand-new
+        // install (no state file) still honours the configured value.
+        if ($hasStoredState && (int) ($cursors['__version'] ?? 0) < self::STATE_VERSION) {
+            $cursors = [];
+            $this->firstRunBytes = max($this->firstRunBytes, self::DEFAULT_FIRST_RUN_BYTES);
+        }
+
+        $cursors['__version'] = self::STATE_VERSION;
         $next = $cursors;
         $results = [];
         $seenPaths = [];
@@ -171,7 +196,9 @@ class LogsCollector extends BaseCollector implements CommitsAfterReport, Provide
                 $seenPaths[$target['resolved_path']] = true;
             }
 
-            [$result, $state] = $this->collectTarget($target, $cursors[$target['key']] ?? null);
+            $cursor = $cursors[$target['key']] ?? null;
+
+            [$result, $state] = $this->collectTarget($target, is_array($cursor) ? $cursor : null);
 
             if ($state !== null) {
                 $next[$target['key']] = $state;

@@ -25,6 +25,9 @@ class ReportService
                 $headers['X-API-Key'] = $apiKey;
             }
 
+            echo 'headers > '.json_encode($headers).PHP_EOL;
+            echo 'req body > '.json_encode($payload).PHP_EOL;
+
             $response = Http::withHeaders($headers)->withOptions(['timeout' => 15, 'connect_timeout' => 5])
                 ->post($config->resolveApiBase().'/v1/agent/report', $payload);
 
@@ -41,6 +44,8 @@ class ReportService
             }
 
             $body = mb_substr((string) $response->body(), 0, 1000);
+
+            echo 'Response > '.$body;
 
             return ['success' => false, 'status' => $status, 'error' => "unexpected_status ({$status}): {$body}"];
         } catch (\Throwable $e) {
