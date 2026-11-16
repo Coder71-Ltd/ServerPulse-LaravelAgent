@@ -14,6 +14,7 @@ class ConfigService
     private array $fallbackDefaults = [
         'enabled' => true,
         'blocked' => false,
+        'log_channels' => [],
         'log_paths' => [],
         'git_paths' => [],
         'collect' => [
@@ -59,7 +60,7 @@ class ConfigService
 
         try {
             $headers = [
-                'X-Agent-Version' => '1.0',
+                'X-Agent-Version' => '1.1',
                 'X-Agent-Domain' => $this->resolveAgentDomain(),
             ];
 

@@ -63,6 +63,11 @@ function makeServerCollector(array $procFiles = [], array $files = [], array $sh
             return $this->shell[$command] ?? null;
         }
 
+        protected function loadAverages(): array|false
+        {
+            return false;
+        }
+
         protected function sysCpuDirectories(): array
         {
             return [];

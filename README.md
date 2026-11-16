@@ -28,7 +28,7 @@ artisan serverpulse:report (every 60s)
   │     ├── PhpCollector             — version, extensions, ini
   │     ├── DatabaseCollector        — MySQL status, slow queries
   │     ├── GitCollector             — branch, commit per repo
-  │     ├── LogsCollector            — tail, error count per log
+  │     ├── LogsCollector            — channel resolution, incremental tail
   │     ├── SecurityCollector        — failed SSH logins
   │     ├── LaravelCollector         — env, queue, Horizon, exceptions
   │     └── DomainCollector          — app_url, hostname, SSL expiry

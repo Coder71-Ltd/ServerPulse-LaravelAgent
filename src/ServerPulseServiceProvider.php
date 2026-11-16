@@ -30,7 +30,6 @@ class ServerPulseServiceProvider extends ServiceProvider
             __DIR__.'/../config/serverpulse.php', 'services.serverpulse'
         );
 
-
         $this->app->singleton(ConfigService::class);
         $this->app->singleton(ReportService::class);
         $this->app->singleton(ServerPulseHandler::class);

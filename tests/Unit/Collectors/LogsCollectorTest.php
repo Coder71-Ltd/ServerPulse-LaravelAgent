@@ -1,274 +1,415 @@
 <?php
 
-use Orchestra\Testbench\TestCase;
 use ServerPulse\Agent\Collectors\LogsCollector;
-
-uses(TestCase::class);
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+use ServerPulse\Agent\Support\LogChannelResolver;
+use ServerPulse\Agent\Support\LogCursorStore;
 
 /**
- * Assert that a log entry has the correct structure.
+ * Create a unique temporary directory for log fixtures.
  */
-function assertLogEntryKeys(array $entry): void
+function spCollectorDir(): string
 {
-    expect($entry)->toHaveKeys(['datetime', 'message', 'level']);
+    $dir = sys_get_temp_dir().DIRECTORY_SEPARATOR.'sp_logs_'.bin2hex(random_bytes(4));
+    mkdir($dir, 0777, true);
+
+    return $dir;
 }
 
 /**
- * Assert that a log file result has the correct structure.
+ * Build a Monolog-formatted line.
  */
-function assertLogFileResult(array $result): void
+function spMonolog(string $level, string $message, ?string $datetime = null): string
 {
-    expect($result)->toHaveKeys(['path', 'count', 'entries']);
+    return '['.($datetime ?? date('Y-m-d H:i:s')).'] local.'.$level.': '.$message;
 }
 
 /**
- * Create a temporary file with the given content.
- *
- * @return string The temp file path.
+ * @param  array<string, mixed>  $channels
  */
-function createTempLog(string $content): string
+function spCollector(array $channels, string $statePath): LogsCollector
 {
-    $path = tempnam(sys_get_temp_dir(), 'sp_test_');
-    file_put_contents($path, $content);
-
-    return $path;
+    return new LogsCollector(
+        new LogChannelResolver($channels),
+        new LogCursorStore($statePath),
+    );
 }
 
-/**
- * Today's date (YYYY-MM-DD) used in log entry fixtures so entries
- * match the collector's reporting-date filter.
- */
-function reportDate(): string
-{
-    return date('Y-m-d');
-}
+it('sends only lines added since the last committed run', function () {
+    $dir = spCollectorDir();
+    $file = $dir.'/sms.log';
+    $collector = spCollector(['sms' => ['driver' => 'single', 'path' => $file]], $dir.'/state.json');
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
+    file_put_contents($file, spMonolog('INFO', 'one')."\n".spMonolog('INFO', 'two')."\n");
 
-it('returns all log result keys', function () {
-    $collector = new LogsCollector;
-    $result = $collector->collect([]);
+    $first = $collector->collect(['log_channels' => ['sms'], 'log_first_run_bytes' => 0]);
+    $collector->commit();
 
-    expect($result)->toBeArray();
+    expect($first)->toBe([]);
+
+    file_put_contents($file, spMonolog('INFO', 'three')."\n", FILE_APPEND);
+
+    $second = $collector->collect(['log_channels' => ['sms'], 'log_first_run_bytes' => 0]);
+    $collector->commit();
+
+    expect($second)->toHaveCount(1);
+    expect($second[0]['count'])->toBe(1);
+    expect($second[0]['entries'][0]['message'])->toBe('three');
+    expect($second[0]['from_offset'])->toBeGreaterThan(0);
+
+    expect($collector->collect(['log_channels' => ['sms'], 'log_first_run_bytes' => 0]))->toBe([]);
 });
 
-it('parses Monolog ERROR line correctly', function () {
-    $tempFile = createTempLog('['.reportDate().' 10:15:30] production.ERROR: Something broke');
+it('does not advance the cursor until commit is called', function () {
+    $dir = spCollectorDir();
+    $file = $dir.'/sms.log';
+    $collector = spCollector(['sms' => ['driver' => 'single', 'path' => $file]], $dir.'/state.json');
 
-    $collector = new class extends LogsCollector
-    {
-        protected function safeExec(string $command): ?string
-        {
-            if (preg_match('/tail -n 1000 (.+) 2>\\/dev\\/null/', $command, $m)) {
-                $maybePath = trim($m[1], " \"'");
-                if (file_exists($maybePath)) {
-                    return file_get_contents($maybePath);
-                }
-            }
+    file_put_contents($file, spMonolog('INFO', 'one')."\n");
 
-            return null;
-        }
-    };
+    $config = ['log_channels' => ['sms'], 'log_first_run_bytes' => 65536];
 
-    $result = $collector->collect([
-        'log_paths' => [$tempFile],
-    ]);
+    $first = $collector->collect($config);
+    $again = $collector->collect($config);
 
-    unlink($tempFile);
+    expect($first[0]['count'])->toBe(1);
+    expect($again[0]['count'])->toBe(1);
 
-    expect($result)->toHaveCount(1);
-    assertLogFileResult($result[0]);
-    expect($result[0]['path'])->toBe($tempFile);
-    expect($result[0]['count'])->toBe(1);
+    $collector->commit();
 
-    $entry = $result[0]['entries'][0];
-    assertLogEntryKeys($entry);
-    expect($entry['datetime'])->toBe(reportDate().' 10:15:30');
-    expect($entry['level'])->toBe('ERROR');
-    expect($entry['message'])->toBe('Something broke');
+    expect($collector->collect($config))->toBe([]);
 });
 
-it('captures all 5 Monolog levels', function () {
-    $lines = implode("\n", [
-        '['.reportDate().' 10:15:30] production.ERROR: Error occurred',
-        '['.reportDate().' 10:15:31] production.WARNING: Warning occurred',
-        '['.reportDate().' 10:15:32] production.CRITICAL: Critical occurred',
-        '['.reportDate().' 10:15:33] production.ALERT: Alert occurred',
-        '['.reportDate().' 10:15:34] production.EMERGENCY: Emergency occurred',
-    ]);
+it('reports a failed cursor write and keeps the batch retryable', function () {
+    $dir = spCollectorDir();
+    $file = $dir.'/app.log';
 
-    $tempFile = createTempLog($lines);
+    $collector = new LogsCollector(
+        new LogChannelResolver(['app' => ['driver' => 'single', 'path' => $file]]),
+        new LogCursorStore($dir),
+    );
 
-    $collector = new class extends LogsCollector
-    {
-        protected function safeExec(string $command): ?string
-        {
-            if (preg_match('/tail -n 1000 (.+) 2>\\/dev\\/null/', $command, $m)) {
-                $maybePath = trim($m[1], " \"'");
-                if (file_exists($maybePath)) {
-                    return file_get_contents($maybePath);
-                }
-            }
+    file_put_contents($file, spMonolog('INFO', 'one')."\n");
 
-            return null;
-        }
-    };
+    $config = ['log_channels' => ['app'], 'log_first_run_bytes' => 65536];
 
-    $result = $collector->collect([
-        'log_paths' => [$tempFile],
-    ]);
+    expect($collector->collect($config))->toHaveCount(1);
+    expect($collector->commit())->toBeFalse();
 
-    unlink($tempFile);
+    // The pending state is kept, so the same batch is retried next time.
+    $retry = $collector->collect($config);
 
-    expect($result)->toHaveCount(1);
-    expect($result[0]['count'])->toBe(5);
-
-    $levels = array_map(fn ($e) => $e['level'], $result[0]['entries']);
-    expect($levels)->toContain('ERROR');
-    expect($levels)->toContain('WARNING');
-    expect($levels)->toContain('CRITICAL');
-    expect($levels)->toContain('ALERT');
-    expect($levels)->toContain('EMERGENCY');
+    expect($retry[0]['count'])->toBe(1);
 });
 
-it('handles missing file gracefully', function () {
-    $collector = new class extends LogsCollector
-    {
-        protected function safeExec(string $command): ?string
-        {
-            return null;
-        }
-    };
+it('starts at the end of the file on the first run', function () {
+    $dir = spCollectorDir();
+    $file = $dir.'/app.log';
+    $collector = spCollector(['app' => ['driver' => 'single', 'path' => $file]], $dir.'/state.json');
 
-    $result = $collector->collect([
-        'log_paths' => ['/var/log/nonexistent.log'],
-    ]);
-
-    expect($result)->toHaveCount(1);
-    expect($result[0]['path'])->toBe('/var/log/nonexistent.log');
-    expect($result[0]['count'])->toBe(0);
-    expect($result[0]['entries'])->toBe([]);
-});
-
-it('copes entries at 100', function () {
     $lines = [];
-    $levels = ['ERROR', 'WARNING', 'CRITICAL', 'ALERT', 'EMERGENCY'];
-    for ($i = 0; $i < 150; $i++) {
-        $level = $levels[$i % 5];
-        $lines[] = '['.reportDate()." 10:00:00] production.{$level}: Log entry {$i}";
+    for ($i = 0; $i < 2000; $i++) {
+        $lines[] = spMonolog('INFO', str_repeat('x', 100).$i);
     }
-    $content = implode("\n", $lines);
+    file_put_contents($file, implode("\n", $lines)."\n");
 
-    $tempFile = createTempLog($content);
+    $first = $collector->collect(['log_channels' => ['app'], 'log_first_run_bytes' => 0]);
+    $collector->commit();
 
-    $collector = new class extends LogsCollector
-    {
-        protected function safeExec(string $command): ?string
-        {
-            if (preg_match('/tail -n 1000 (.+) 2>\\/dev\\/null/', $command, $m)) {
-                $maybePath = trim($m[1], " \"'");
-                if (file_exists($maybePath)) {
-                    return file_get_contents($maybePath);
-                }
-            }
+    expect($first)->toBe([]);
 
-            return null;
-        }
-    };
+    file_put_contents($file, spMonolog('INFO', 'after baseline')."\n", FILE_APPEND);
 
-    $result = $collector->collect([
-        'log_paths' => [$tempFile],
-    ]);
+    $second = $collector->collect(['log_channels' => ['app'], 'log_first_run_bytes' => 0]);
 
-    unlink($tempFile);
-
-    expect($result)->toHaveCount(1);
-    expect($result[0]['count'])->toBe(150);
-    expect($result[0]['entries'])->toHaveCount(100);
+    expect($second[0]['count'])->toBe(1);
+    expect($second[0]['entries'][0]['message'])->toBe('after baseline');
+    expect($second[0]['from_offset'])->toBeGreaterThan(0);
 });
 
-it('handles non-Monolog lines gracefully', function () {
-    $lines = implode("\n", [
-        '['.reportDate().' 10:15:30] production.INFO: Just info — not counted',
-        '['.reportDate().' 10:15:31] production.DEBUG: Debug message — not counted',
-        '['.reportDate().' 10:15:32] Some random non-log message',
+it('re-reads the initial tail when the cursor state version is old', function () {
+    $dir = spCollectorDir();
+    $file = $dir.'/app.log';
+    $statePath = $dir.'/state.json';
+
+    file_put_contents($file, spMonolog('INFO', 'existing line')."\n");
+
+    // Old state that points at EOF but has no version marker.
+    file_put_contents($statePath, json_encode([
+        'channel:app' => ['path' => $file, 'offset' => filesize($file)],
+    ]));
+
+    $collector = spCollector(['app' => ['driver' => 'single', 'path' => $file]], $statePath);
+
+    $result = $collector->collect(['log_channels' => ['app'], 'log_first_run_bytes' => 65536]);
+    $collector->commit();
+
+    expect($result[0]['entries'])->toHaveCount(1);
+    expect($result[0]['entries'][0]['message'])->toBe('existing line');
+
+    $state = json_decode(file_get_contents($statePath), true);
+    expect($state['__version'])->toBe(2);
+
+    // The next run must not re-read it.
+    expect($collector->collect(['log_channels' => ['app']]))->toBe([]);
+});
+
+it('caps entries per run and continues on the next run', function () {
+    $dir = spCollectorDir();
+    $file = $dir.'/app.log';
+    $collector = spCollector(['app' => ['driver' => 'single', 'path' => $file]], $dir.'/state.json');
+
+    $lines = [];
+    for ($i = 0; $i < 600; $i++) {
+        $lines[] = spMonolog('INFO', (string) $i);
+    }
+    file_put_contents($file, implode("\n", $lines)."\n");
+
+    $first = $collector->collect(['log_channels' => ['app'], 'log_first_run_bytes' => 65536]);
+    $collector->commit();
+
+    expect($first[0]['count'])->toBe(500);
+
+    $second = $collector->collect(['log_channels' => ['app']]);
+
+    expect($second[0]['count'])->toBe(100);
+    expect($second[0]['entries'][0]['message'])->toBe('500');
+});
+
+it('starts from the beginning when a daily file rotates', function () {
+    $dir = spCollectorDir();
+    $collector = spCollector(['sms' => ['driver' => 'daily', 'path' => $dir.'/sms.log']], $dir.'/state.json');
+
+    $firstFile = $dir.'/sms-2026-11-15.log';
+    file_put_contents($firstFile, spMonolog('INFO', 'yesterday')."\n");
+
+    $first = $collector->collect(['log_channels' => ['sms'], 'log_first_run_bytes' => 0]);
+    $collector->commit();
+
+    expect($first)->toBe([]);
+
+    $secondFile = $dir.'/sms-2026-11-16.log';
+    file_put_contents($secondFile, spMonolog('INFO', 'today')."\n");
+
+    $second = $collector->collect(['log_channels' => ['sms'], 'log_first_run_bytes' => 0]);
+    $collector->commit();
+
+    expect($second[0]['entries'][0]['message'])->toBe('today');
+    expect($second[0]['from_offset'])->toBe(0);
+});
+
+it('re-reads from the start when the file is truncated', function () {
+    $dir = spCollectorDir();
+    $file = $dir.'/app.log';
+    $collector = spCollector(['app' => ['driver' => 'single', 'path' => $file]], $dir.'/state.json');
+
+    file_put_contents($file, spMonolog('INFO', 'old one')."\n".spMonolog('INFO', 'old two')."\n");
+
+    $collector->collect(['log_channels' => ['app']]);
+    $collector->commit();
+
+    file_put_contents($file, spMonolog('INFO', 'after truncate')."\n");
+
+    $result = $collector->collect(['log_channels' => ['app']]);
+
+    expect($result[0]['entries'])->toHaveCount(1);
+    expect($result[0]['entries'][0]['message'])->toBe('after truncate');
+    expect($result[0]['from_offset'])->toBe(0);
+});
+
+it('makes progress past a line larger than the read window', function () {
+    $dir = spCollectorDir();
+    $file = $dir.'/app.log';
+    $collector = spCollector(['app' => ['driver' => 'single', 'path' => $file]], $dir.'/state.json');
+
+    file_put_contents($file, spMonolog('INFO', 'first')."\n");
+    $collector->collect(['log_channels' => ['app']]);
+    $collector->commit();
+
+    // A single unterminated line bigger than MAX_BYTES_PER_RUN.
+    file_put_contents($file, str_repeat('x', 300000), FILE_APPEND);
+    $collector->collect(['log_channels' => ['app']]);
+    $collector->commit();
+
+    file_put_contents($file, "\n".spMonolog('INFO', 'after giant')."\n", FILE_APPEND);
+
+    $result = $collector->collect(['log_channels' => ['app']]);
+
+    expect($result[0]['entries'])->toHaveCount(1);
+    expect($result[0]['entries'][0]['message'])->toBe('after giant');
+});
+
+it('waits for a complete line before consuming it', function () {
+    $dir = spCollectorDir();
+    $file = $dir.'/app.log';
+    $collector = spCollector(['app' => ['driver' => 'single', 'path' => $file]], $dir.'/state.json');
+
+    // Establish a cursor after a complete line.
+    file_put_contents($file, spMonolog('INFO', 'first')."\n");
+    $collector->collect(['log_channels' => ['app']]);
+    $collector->commit();
+
+    $partial = '['.date('Y-m-d H:i:s').'] local.INFO: hel';
+    file_put_contents($file, $partial, FILE_APPEND);
+
+    $first = $collector->collect(['log_channels' => ['app']]);
+    $collector->commit();
+
+    expect($first)->toBe([]);
+
+    file_put_contents($file, "lo\n", FILE_APPEND);
+
+    $second = $collector->collect(['log_channels' => ['app']]);
+
+    expect($second[0]['entries'])->toHaveCount(1);
+    expect($second[0]['entries'][0]['message'])->toBe('hello');
+});
+
+it('keeps stack trace continuation lines with their entry', function () {
+    $dir = spCollectorDir();
+    $file = $dir.'/app.log';
+    $collector = spCollector(['app' => ['driver' => 'single', 'path' => $file]], $dir.'/state.json');
+
+    file_put_contents($file, implode("\n", [
+        spMonolog('ERROR', 'First error'),
+        '#0 /app/vendor/framework/File.php(10): something()',
+        '#1 /app/public/index.php(20): other()',
+        spMonolog('WARNING', 'Second warning'),
         '',
-        'Plain text line with no brackets',
-    ]);
+    ]));
 
-    $tempFile = createTempLog($lines);
+    $result = $collector->collect(['log_channels' => ['app'], 'log_first_run_bytes' => 65536]);
 
-    $collector = new class extends LogsCollector
-    {
-        protected function safeExec(string $command): ?string
-        {
-            if (preg_match('/tail -n 1000 (.+) 2>\\/dev\\/null/', $command, $m)) {
-                $maybePath = trim($m[1], " \"'");
-                if (file_exists($maybePath)) {
-                    return file_get_contents($maybePath);
-                }
-            }
+    expect($result[0]['entries'])->toHaveCount(2);
+    expect($result[0]['entries'][0]['message'])->toContain('First error');
+    expect($result[0]['entries'][0]['message'])->toContain('#1 /app/public/index.php');
+    expect($result[0]['entries'][1]['message'])->toBe('Second warning');
+});
 
-            return null;
-        }
-    };
+it('includes INFO entries and skips DEBUG by default', function () {
+    $dir = spCollectorDir();
+    $file = $dir.'/app.log';
+    $collector = spCollector(['app' => ['driver' => 'single', 'path' => $file]], $dir.'/state.json');
+
+    file_put_contents($file, implode("\n", [
+        spMonolog('DEBUG', 'debug noise'),
+        spMonolog('INFO', 'useful info'),
+        spMonolog('ERROR', 'real error'),
+        '',
+    ]));
+
+    $result = $collector->collect(['log_channels' => ['app'], 'log_first_run_bytes' => 65536]);
+    $levels = array_column($result[0]['entries'], 'level');
+
+    expect($levels)->toBe(['INFO', 'ERROR']);
+    expect($result[0]['levels_skipped'])->toBe(1);
+});
+
+it('advances past filtered debug lines without resending them', function () {
+    $dir = spCollectorDir();
+    $file = $dir.'/app.log';
+    $collector = spCollector(['app' => ['driver' => 'single', 'path' => $file]], $dir.'/state.json');
+
+    file_put_contents($file, '');
+
+    // First run establishes the cursor at EOF.
+    expect($collector->collect(['log_channels' => ['app'], 'log_first_run_bytes' => 0]))->toBe([]);
+    $collector->commit();
+
+    file_put_contents($file, spMonolog('DEBUG', 'only debug')."\n", FILE_APPEND);
+
+    expect($collector->collect(['log_channels' => ['app'], 'log_first_run_bytes' => 0]))->toBe([]);
+    $collector->commit();
+
+    file_put_contents($file, spMonolog('INFO', 'now info')."\n", FILE_APPEND);
+
+    $result = $collector->collect(['log_channels' => ['app'], 'log_first_run_bytes' => 0]);
+
+    expect($result[0]['entries'])->toHaveCount(1);
+    expect($result[0]['entries'][0]['message'])->toBe('now info');
+});
+
+it('truncates very large log lines', function () {
+    $dir = spCollectorDir();
+    $file = $dir.'/app.log';
+    $collector = spCollector(['app' => ['driver' => 'single', 'path' => $file]], $dir.'/state.json');
+
+    file_put_contents($file, spMonolog('ERROR', str_repeat('a', 20000))."\n");
+
+    $result = $collector->collect(['log_channels' => ['app'], 'log_first_run_bytes' => 65536]);
+    $message = $result[0]['entries'][0]['message'];
+
+    expect(strlen($message))->toBeLessThan(20000);
+    expect($message)->toContain('[truncated');
+});
+
+it('accepts a channel name in the legacy log_paths field', function () {
+    $dir = spCollectorDir();
+    $file = $dir.'/sms.log';
+    $collector = spCollector(['sms' => ['driver' => 'single', 'path' => $file]], $dir.'/state.json');
+
+    file_put_contents($file, spMonolog('INFO', 'via bridge')."\n");
 
     $result = $collector->collect([
-        'log_paths' => [$tempFile],
+        'log_paths' => [['label' => 'sms', 'path' => 'sms']],
+        'log_first_run_bytes' => 65536,
     ]);
 
-    unlink($tempFile);
+    expect($result)->toHaveCount(1);
+    expect($result[0]['channel'])->toBe('sms');
+    expect($result[0]['path'])->toBe('sms');
+    expect($result[0]['resolved_path'])->toBe($file);
+    expect($result[0]['entries'][0]['message'])->toBe('via bridge');
+});
+
+it('reports discovered channels as an extra payload', function () {
+    $dir = spCollectorDir();
+    $collector = spCollector([
+        'sms' => ['driver' => 'single', 'path' => $dir.'/sms.log'],
+        'slack' => ['driver' => 'slack', 'url' => 'https://example.com'],
+    ], $dir.'/state.json');
+
+    $collector->collect(['log_channels' => ['sms']]);
+
+    $extra = $collector->extraPayload();
+
+    expect($extra)->toHaveKey('log_channels');
+    expect(array_column($extra['log_channels'], 'name'))->toBe(['slack', 'sms']);
+});
+
+it('returns a zero-count result for a missing channel file', function () {
+    $dir = spCollectorDir();
+    $collector = spCollector(['app' => ['driver' => 'single', 'path' => $dir.'/missing.log']], $dir.'/state.json');
+
+    $result = $collector->collect(['log_channels' => ['app']]);
 
     expect($result)->toHaveCount(1);
+    expect($result[0]['path'])->toBe('app');
     expect($result[0]['count'])->toBe(0);
     expect($result[0]['entries'])->toBe([]);
+    expect($result[0]['error'])->toBe('not_readable');
 });
 
-it('parses multi-line entries from fake tail', function () {
-    $lines = implode("\n", [
-        '['.reportDate().' 10:15:30] production.ERROR: First error',
-        'Some non-matching line',
-        '['.reportDate().' 10:15:31] production.CRITICAL: Critical issue',
-        'Another non-matching line',
-        '['.reportDate().' 10:15:32] production.WARNING: Warning message',
-    ]);
+it('still expands a directory log path into its log files', function () {
+    $dir = spCollectorDir();
+    $logs = $dir.'/logs';
+    mkdir($logs);
 
-    $tempFile = createTempLog($lines);
+    $fileA = $logs.'/a.log';
+    $fileB = $logs.'/b.log';
+    file_put_contents($fileA, spMonolog('ERROR', 'from a')."\n");
+    file_put_contents($fileB, spMonolog('WARNING', 'from b')."\n");
 
-    $collector = new class extends LogsCollector
-    {
-        protected function safeExec(string $command): ?string
-        {
-            if (preg_match('/tail -n 1000 (.+) 2>\\/dev\\/null/', $command, $m)) {
-                $maybePath = trim($m[1], " \"'");
-                if (file_exists($maybePath)) {
-                    return file_get_contents($maybePath);
-                }
-            }
+    $collector = spCollector([], $dir.'/state.json');
 
-            return null;
-        }
-    };
+    $result = $collector->collect(['log_paths' => [$logs], 'log_first_run_bytes' => 65536]);
+    $collector->commit();
 
-    $result = $collector->collect([
-        'log_paths' => [$tempFile],
-    ]);
+    expect($result)->toHaveCount(2);
+    expect(array_column($result, 'path'))->toBe([$logs, $logs]);
+    expect(array_column($result, 'resolved_path'))->toBe([$fileB, $fileA]);
+    expect(array_sum(array_column($result, 'count')))->toBe(2);
 
-    unlink($tempFile);
-
-    expect($result)->toHaveCount(1);
-    expect($result[0]['count'])->toBe(3);
-
-    $messages = array_map(fn ($e) => $e['message'], $result[0]['entries']);
-    expect($messages)->toContain('First error');
-    expect($messages)->toContain('Critical issue');
-    expect($messages)->toContain('Warning message');
+    expect($collector->collect(['log_paths' => [$logs]]))->toBe([]);
 });
 
 it('handles base collector exception wrapping', function () {
@@ -280,328 +421,5 @@ it('handles base collector exception wrapping', function () {
         }
     };
 
-    $result = $collector->collect([]);
-
-    expect($result)->toBe([]);
-});
-
-it('handles unreadable file returns zero count', function () {
-    $tempFile = createTempLog('['.reportDate().' 10:15:30] production.ERROR: Readable file error');
-
-    $collector = new class extends LogsCollector
-    {
-        protected function safeExec(string $command): ?string
-        {
-            if (preg_match('/tail -n 1000 (.+) 2>\\/dev\\/null/', $command, $m)) {
-                $maybePath = trim($m[1], " \"'");
-                if (file_exists($maybePath)) {
-                    return file_get_contents($maybePath);
-                }
-            }
-
-            return null;
-        }
-    };
-
-    $result = $collector->collect([
-        'log_paths' => [$tempFile, '/var/log/unreadable.log'],
-    ]);
-
-    unlink($tempFile);
-
-    expect($result)->toHaveCount(2);
-
-    // First file (readable) has count > 0
-    expect($result[0]['path'])->toBe($tempFile);
-    expect($result[0]['count'])->toBe(1);
-
-    // Second file (unreadable) has count 0
-    expect($result[1]['path'])->toBe('/var/log/unreadable.log');
-    expect($result[1]['count'])->toBe(0);
-    expect($result[1]['entries'])->toBe([]);
-});
-
-it('normalizes object-format log paths', function () {
-    $tempFile1 = createTempLog('['.reportDate().' 10:15:30] production.ERROR: First app error');
-    $tempFile2 = createTempLog('['.reportDate().' 10:15:31] production.WARNING: Worker warning');
-
-    $collector = new class extends LogsCollector
-    {
-        protected function safeExec(string $command): ?string
-        {
-            if (preg_match('/tail -n 1000 (.+) 2>\\/dev\\/null/', $command, $m)) {
-                $maybePath = trim($m[1], " \"'");
-                if (file_exists($maybePath)) {
-                    return file_get_contents($maybePath);
-                }
-            }
-
-            return null;
-        }
-    };
-
-    $result = $collector->collect([
-        'log_paths' => [
-            ['label' => 'app', 'path' => $tempFile1],
-            ['label' => 'worker', 'path' => $tempFile2],
-        ],
-    ]);
-
-    unlink($tempFile1);
-    unlink($tempFile2);
-
-    expect($result)->toHaveCount(2);
-
-    // First file from object-format path
-    expect($result[0]['path'])->toBe($tempFile1);
-    expect($result[0]['count'])->toBe(1);
-
-    // Second file from object-format path
-    expect($result[1]['path'])->toBe($tempFile2);
-    expect($result[1]['count'])->toBe(1);
-});
-
-it('reads log files via PHP fallback when shell is unavailable', function () {
-    $content = '['.reportDate()." 10:15:30] production.ERROR: Shell offline error\n";
-    $content .= '['.reportDate()." 10:15:31] production.CRITICAL: PHP fallback test\n";
-
-    $tempFile = createTempLog($content);
-
-    $collector = new class extends LogsCollector
-    {
-        protected function safeExec(string $command): ?string
-        {
-            return null;
-        }
-    };
-
-    $result = $collector->collect([
-        'log_paths' => [$tempFile],
-    ]);
-
-    unlink($tempFile);
-
-    expect($result)->toHaveCount(1);
-    expect($result[0]['path'])->toBe($tempFile);
-    expect($result[0]['count'])->toBe(2);
-    expect($result[0]['entries'][0]['level'])->toBe('ERROR');
-    expect($result[0]['entries'][0]['message'])->toBe('Shell offline error');
-    expect($result[0]['entries'][1]['level'])->toBe('CRITICAL');
-    expect($result[0]['entries'][1]['message'])->toBe('PHP fallback test');
-});
-
-it('returns zero count when both shell and PHP read fail', function () {
-    $collector = new class extends LogsCollector
-    {
-        protected function safeExec(string $command): ?string
-        {
-            return null;
-        }
-    };
-
-    $result = $collector->collect([
-        'log_paths' => ['/var/log/truly_missing.log'],
-    ]);
-
-    expect($result)->toHaveCount(1);
-    expect($result[0]['path'])->toBe('/var/log/truly_missing.log');
-    expect($result[0]['count'])->toBe(0);
-    expect($result[0]['entries'])->toBe([]);
-});
-
-it('expands directory log_path into its *.log files', function () {
-    $dir = sys_get_temp_dir().DIRECTORY_SEPARATOR.'sp_logdir_'.uniqid();
-    mkdir($dir);
-
-    $fileA = $dir.DIRECTORY_SEPARATOR.'laravel-'.reportDate().'.log';
-    $fileB = $dir.DIRECTORY_SEPARATOR.'laravel-2026-07-30.log';
-    file_put_contents($fileA, '['.reportDate()." 10:00:00] production.ERROR: Latest error\n");
-    file_put_contents($fileB, "[2026-07-30 10:00:00] production.WARNING: Older warning\n");
-
-    $collector = new class extends LogsCollector
-    {
-        protected function safeExec(string $command): ?string
-        {
-            if (preg_match('/tail -n 1000 (.+) 2>\\/dev\\/null/', $command, $m)) {
-                $maybePath = trim($m[1], " \"'");
-                if (file_exists($maybePath)) {
-                    return file_get_contents($maybePath);
-                }
-            }
-
-            return null;
-        }
-    };
-
-    try {
-        $result = $collector->collect([
-            'log_paths' => [$dir],
-        ]);
-    } finally {
-        unlink($fileA);
-        unlink($fileB);
-        rmdir($dir);
-    }
-
-    expect($result)->toHaveCount(2);
-    expect($result[0]['path'])->toBe(str_replace('\\', '/', $fileA));
-    expect($result[0]['count'])->toBe(1);
-    expect($result[0]['entries'][0]['message'])->toBe('Latest error');
-    expect($result[1]['path'])->toBe(str_replace('\\', '/', $fileB));
-    expect($result[1]['count'])->toBe(1);
-    expect($result[1]['entries'][0]['message'])->toBe('Older warning');
-});
-
-it('returns single zero-count result for a directory without log files', function () {
-    $dir = sys_get_temp_dir().DIRECTORY_SEPARATOR.'sp_logdir_'.uniqid();
-    mkdir($dir);
-
-    $collector = new class extends LogsCollector
-    {
-        protected function safeExec(string $command): ?string
-        {
-            return null;
-        }
-    };
-
-    try {
-        $result = $collector->collect([
-            'log_paths' => [$dir],
-        ]);
-    } finally {
-        rmdir($dir);
-    }
-
-    expect($result)->toHaveCount(1);
-    expect($result[0]['path'])->toBe($dir);
-    expect($result[0]['count'])->toBe(0);
-    expect($result[0]['entries'])->toBe([]);
-});
-
-it('caps directory scan at 10 newest log files', function () {
-    $dir = sys_get_temp_dir().DIRECTORY_SEPARATOR.'sp_logdir_'.uniqid();
-    mkdir($dir);
-
-    $paths = [];
-
-    for ($i = 1; $i <= 12; $i++) {
-        $day = str_pad((string) $i, 2, '0', STR_PAD_LEFT);
-        $file = $dir.DIRECTORY_SEPARATOR.'laravel-2026-08-'.$day.'.log';
-        file_put_contents($file, '['.reportDate()." 10:00:00] production.ERROR: Error {$i}\n");
-        $paths[] = $file;
-    }
-
-    $collector = new class extends LogsCollector
-    {
-        protected function safeExec(string $command): ?string
-        {
-            if (preg_match('/tail -n 1000 (.+) 2>\\/dev\\/null/', $command, $m)) {
-                $maybePath = trim($m[1], " \"'");
-                if (file_exists($maybePath)) {
-                    return file_get_contents($maybePath);
-                }
-            }
-
-            return null;
-        }
-    };
-
-    try {
-        $result = $collector->collect([
-            'log_paths' => [$dir],
-        ]);
-    } finally {
-        foreach ($paths as $file) {
-            unlink($file);
-        }
-        rmdir($dir);
-    }
-
-    expect($result)->toHaveCount(10);
-
-    foreach ($result as $fileResult) {
-        expect($fileResult['count'])->toBe(1);
-        expect($fileResult['entries'][0]['level'])->toBe('ERROR');
-    }
-});
-
-it('only keeps entries from the reporting date', function () {
-    $lines = implode("\n", [
-        '['.reportDate().' 10:15:30] production.ERROR: Today error',
-        '[2026-07-04 10:15:31] production.CRITICAL: Old critical',
-        '['.reportDate().' 10:15:32] production.WARNING: Today warning',
-        '[2026-08-01 10:15:33] production.ERROR: Old error',
-    ]);
-
-    $tempFile = createTempLog($lines);
-
-    $collector = new class extends LogsCollector
-    {
-        protected function safeExec(string $command): ?string
-        {
-            if (preg_match('/tail -n 1000 (.+) 2>\\/dev\\/null/', $command, $m)) {
-                $maybePath = trim($m[1], " \"'");
-                if (file_exists($maybePath)) {
-                    return file_get_contents($maybePath);
-                }
-            }
-
-            return null;
-        }
-    };
-
-    $result = $collector->collect([
-        'log_paths' => [$tempFile],
-    ]);
-
-    unlink($tempFile);
-
-    expect($result)->toHaveCount(1);
-    expect($result[0]['count'])->toBe(2);
-
-    $messages = array_map(fn ($e) => $e['message'], $result[0]['entries']);
-    expect($messages)->toContain('Today error');
-    expect($messages)->toContain('Today warning');
-    expect($messages)->not->toContain('Old critical');
-    expect($messages)->not->toContain('Old error');
-});
-
-it('falls back to the most recent date when the reporting date has no entries', function () {
-    $lines = implode("\n", [
-        '[2026-06-10 10:15:30] production.ERROR: June error',
-        '[2026-08-01 10:15:31] production.CRITICAL: Newest critical',
-        '[2026-08-01 10:15:32] production.WARNING: Newest warning',
-        '[2026-07-20 10:15:33] production.ERROR: July error',
-    ]);
-
-    $tempFile = createTempLog($lines);
-
-    $collector = new class extends LogsCollector
-    {
-        protected function safeExec(string $command): ?string
-        {
-            if (preg_match('/tail -n 1000 (.+) 2>\\/dev\\/null/', $command, $m)) {
-                $maybePath = trim($m[1], " \"'");
-                if (file_exists($maybePath)) {
-                    return file_get_contents($maybePath);
-                }
-            }
-
-            return null;
-        }
-    };
-
-    $result = $collector->collect([
-        'log_paths' => [$tempFile],
-    ]);
-
-    unlink($tempFile);
-
-    expect($result)->toHaveCount(1);
-    expect($result[0]['count'])->toBe(2);
-
-    $entries = $result[0]['entries'];
-    expect($entries[0]['datetime'])->toStartWith('2026-08-01');
-    expect($entries[0]['level'])->toBe('CRITICAL');
-    expect($entries[1]['level'])->toBe('WARNING');
+    expect($collector->collect([]))->toBe([]);
 });
